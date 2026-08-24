@@ -70,9 +70,20 @@ def create_shopify_product(item, token):
     price = str(item.get("reselling_price") or item.get("price") or 0)
     sku = str(item.get("product_code") or item.get("id") or "")
     
+    # Extract category name flexibly from supplier response
+    category_name = ""
+    cat = item.get("category")
+    if isinstance(cat, dict):
+        category_name = cat.get("name", "")
+    elif isinstance(cat, str):
+        category_name = cat
+    
+    if not category_name:
+        category_name = item.get("category_name", "") or item.get("type", "")
+
     images = []
     
-    # Check main product image or thumbnail first if available
+    # Check main thumbnail first
     thumb = item.get("thumbnail") or item.get("thumbnail_img")
     if thumb:
         if not thumb.startswith("http"):
@@ -84,7 +95,6 @@ def create_shopify_product(item, token):
         img_url = img.get("product_image", "")
         if img_url:
             if not img_url.startswith("http"):
-                # Try standard storage path structure
                 img_url = f"https://mohasagor.com.bd/storage/{img_url.lstrip('/')}"
             images.append({"src": img_url})
 
@@ -93,6 +103,8 @@ def create_shopify_product(item, token):
             "title": title,
             "body_html": body_html,
             "vendor": "Supplier",
+            "product_type": category_name,
+            "tags": [category_name] if category_name else [],
             "images": images,
             "variants": [
                 {
@@ -106,7 +118,7 @@ def create_shopify_product(item, token):
 
     res = requests.post(shopify_api_url, json=payload, headers=shopify_headers)
     if res.status_code == 201:
-        print(f"✓ Successfully created with images: {title}")
+        print(f"✓ Successfully created with category '{category_name}': {title}")
     else:
         print(f"✗ Failed to create {title}: {res.status_code} - {res.text}")
 
