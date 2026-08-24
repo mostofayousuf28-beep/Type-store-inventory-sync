@@ -71,11 +71,21 @@ def create_shopify_product(item, token):
     sku = str(item.get("product_code") or item.get("id") or "")
     
     images = []
+    
+    # Check main product image or thumbnail first if available
+    thumb = item.get("thumbnail") or item.get("thumbnail_img")
+    if thumb:
+        if not thumb.startswith("http"):
+            thumb = f"https://mohasagor.com.bd/storage/{thumb.lstrip('/')}"
+        images.append({"src": thumb})
+
+    # Process product image array
     for img in item.get("product_image", []):
         img_url = img.get("product_image", "")
         if img_url:
             if not img_url.startswith("http"):
-                img_url = f"https://mohasagor.com.bd/{img_url.lstrip('/')}"
+                # Try standard storage path structure
+                img_url = f"https://mohasagor.com.bd/storage/{img_url.lstrip('/')}"
             images.append({"src": img_url})
 
     payload = {
@@ -96,7 +106,7 @@ def create_shopify_product(item, token):
 
     res = requests.post(shopify_api_url, json=payload, headers=shopify_headers)
     if res.status_code == 201:
-        print(f"✓ Successfully created: {title}")
+        print(f"✓ Successfully created with images: {title}")
     else:
         print(f"✗ Failed to create {title}: {res.status_code} - {res.text}")
 
