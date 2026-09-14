@@ -25,6 +25,37 @@ def get_shopify_access_token():
         print(f"Failed to authenticate with Shopify: {response.status_code} - {response.text}")
         return None
 
+def get_existing_shopify_skus(token):
+    """Fetches all existing product SKUs from Nogor Essentials to prevent duplicates."""
+    existing_skus = set()
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=variants"
+    headers = {"X-Shopify-Access-Token": token}
+    
+    while url:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f"Error fetching Shopify products: {response.status_code} - {response.text}")
+            break
+        
+        # Add all found SKUs to our set
+        for product in response.json().get("products", []):
+            for variant in product.get("variants", []):
+                sku = variant.get("sku")
+                if sku:
+                    existing_skus.add(str(sku))
+        
+        # Handle Shopify's cursor-based pagination for larger catalogs
+        link_header = response.headers.get("Link")
+        url = None
+        if link_header:
+            for link in link_header.split(","):
+                if 'rel="next"' in link:
+                    url = link[link.find("<")+1:link.find(">")]
+                    break
+    
+    print(f"Found {len(existing_skus)} existing products in Shopify.")
+    return existing_skus
+
 def fetch_supplier_products():
     all_products = []
     page = 1
@@ -70,7 +101,6 @@ def create_shopify_product(item, token):
     price = str(item.get("reselling_price") or item.get("price") or 0)
     sku = str(item.get("product_code") or item.get("id") or "")
     
-    # Extract category name flexibly from supplier response
     category_name = ""
     cat = item.get("category")
     if isinstance(cat, dict):
@@ -83,14 +113,12 @@ def create_shopify_product(item, token):
 
     images = []
     
-    # Check main thumbnail first
     thumb = item.get("thumbnail") or item.get("thumbnail_img")
     if thumb:
         if not thumb.startswith("http"):
             thumb = f"https://mohasagor.com.bd/storage/{thumb.lstrip('/')}"
         images.append({"src": thumb})
 
-    # Process product image array
     for img in item.get("product_image", []):
         img_url = img.get("product_image", "")
         if img_url:
@@ -127,8 +155,21 @@ def main():
     if not token:
         return
 
+    # 1. Fetch SKUs already in your store
+    existing_skus = get_existing_shopify_skus(token)
+    
+    # 2. Fetch all products from supplier
     products = fetch_supplier_products()
+    
+    # 3. Loop and create ONLY if SKU isn't in your store
     for product in products:
+        sku = str(product.get("product_code") or product.get("id") or "")
+        
+        # Check if the product already exists
+        if sku in existing_skus:
+            print(f"⏭️ Skipping duplicate: {product.get('name', 'Product')} (SKU: {sku}) already exists.")
+            continue
+            
         create_shopify_product(product, token)
         time.sleep(0.6)
 
