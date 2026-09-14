@@ -26,10 +26,12 @@ def get_shopify_access_token():
         return None
 
 def get_existing_shopify_skus(token):
-    """Fetches all existing product SKUs from Nogor Essentials to prevent duplicates."""
+    """Fetches existing products and DELETES duplicates automatically."""
     existing_skus = set()
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=variants"
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=id,title,variants"
     headers = {"X-Shopify-Access-Token": token}
+    
+    print("Checking Shopify for duplicates...")
     
     while url:
         response = requests.get(url, headers=headers)
@@ -37,14 +39,29 @@ def get_existing_shopify_skus(token):
             print(f"Error fetching Shopify products: {response.status_code} - {response.text}")
             break
         
-        # Add all found SKUs to our set
         for product in response.json().get("products", []):
-            for variant in product.get("variants", []):
-                sku = variant.get("sku")
-                if sku:
-                    existing_skus.add(str(sku))
+            product_id = product.get("id")
+            title = product.get("title", "Unknown")
+            
+            variants = product.get("variants", [])
+            if not variants:
+                continue
+                
+            sku = str(variants[0].get("sku", ""))
+            if not sku:
+                continue
+                
+            if sku in existing_skus:
+                # Duplicate found! Delete it via Shopify API
+                print(f"🗑️ Deleting duplicate: {title} (SKU: {sku})")
+                delete_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}.json"
+                requests.delete(delete_url, headers=headers)
+                time.sleep(0.5) # Shopify rate limit buffer
+            else:
+                # First time seeing this SKU, keep it in our safe list
+                existing_skus.add(sku)
         
-        # Handle Shopify's cursor-based pagination for larger catalogs
+        # Pagination
         link_header = response.headers.get("Link")
         url = None
         if link_header:
@@ -53,7 +70,7 @@ def get_existing_shopify_skus(token):
                     url = link[link.find("<")+1:link.find(">")]
                     break
     
-    print(f"Found {len(existing_skus)} existing products in Shopify.")
+    print(f"Cleanup complete. Kept {len(existing_skus)} unique products.")
     return existing_skus
 
 def fetch_supplier_products():
@@ -155,7 +172,7 @@ def main():
     if not token:
         return
 
-    # 1. Fetch SKUs already in your store
+    # 1. Fetch SKUs and delete duplicates
     existing_skus = get_existing_shopify_skus(token)
     
     # 2. Fetch all products from supplier
