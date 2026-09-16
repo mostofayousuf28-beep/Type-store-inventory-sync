@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import requests
 
 DROPSHIP_API_KEY = os.environ.get("DROPSHIP_API_KEY")
@@ -29,13 +28,17 @@ def get_shopify_access_token():
     return None
 
 
-def get_existing_shopify_skus(token):
-    """Fetches all existing base SKUs to allow safe resuming."""
-    existing_base_skus = set()
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=variants"
+def get_existing_shopify_products(token):
+    """
+    Returns dict: base_sku -> {"id": product_id, "product_type": "<current type>"}
+    Used both to skip re-creating products AND to find ones whose category
+    needs to be backfilled.
+    """
+    existing = {}
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=id,product_type,variants"
     headers = {"X-Shopify-Access-Token": token}
 
-    print("Scanning Shopify to see what is already imported (so we can skip them)...")
+    print("Scanning Shopify to see what is already imported (so we can skip or fix them)...")
     while url:
         try:
             response = requests.get(url, headers=headers, timeout=15)
@@ -43,11 +46,14 @@ def get_existing_shopify_skus(token):
                 break
 
             for product in response.json().get("products", []):
+                product_id = product.get("id")
+                product_type = (product.get("product_type") or "").strip()
                 for variant in product.get("variants", []):
                     sku = str(variant.get("sku", ""))
                     if sku:
                         base_sku = sku.split('-')[0]
-                        existing_base_skus.add(base_sku)
+                        if base_sku not in existing:
+                            existing[base_sku] = {"id": product_id, "product_type": product_type}
 
             link_header = response.headers.get("Link")
             url = None
@@ -60,8 +66,8 @@ def get_existing_shopify_skus(token):
             print(f"Network blip while scanning Shopify, continuing... ({e})")
             time.sleep(2)
 
-    print(f"Found {len(existing_base_skus)} unique products already in Shopify. Ready to resume!")
-    return existing_base_skus
+    print(f"Found {len(existing)} unique products already in Shopify.")
+    return existing
 
 
 def fetch_supplier_products():
@@ -101,10 +107,6 @@ def fetch_supplier_products():
 
 
 def get_category_name(item):
-    """
-    Tries many possible field names / shapes the supplier might use for
-    category, since the API doesn't document an exact key.
-    """
     candidate_keys = [
         "category", "category_name", "categoryName", "cat_name",
         "main_category", "main_category_name", "product_category",
@@ -138,7 +140,7 @@ def get_category_name(item):
     return "Uncategorized"
 
 
-def create_shopify_product(item, token):
+def create_shopify_product(item, token, category_name):
     shopify_api_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json"
     shopify_headers = {
         "X-Shopify-Access-Token": token,
@@ -147,8 +149,6 @@ def create_shopify_product(item, token):
 
     title = item.get("name", "Untitled Product")
     body_html = item.get("details", "")
-    category_name = get_category_name(item)
-    print(f"   category detected for '{title}': {category_name}")
 
     regular_price = float(item.get("price") or 0)
     sale_price = float(item.get("sale_price") or regular_price)
@@ -206,7 +206,7 @@ def create_shopify_product(item, token):
         try:
             res = requests.post(shopify_api_url, json=payload, headers=shopify_headers, timeout=15)
             if res.status_code == 201:
-                print(f"✓ Created: {title}")
+                print(f"✓ Created: {title} [{category_name}]")
                 return
             elif res.status_code == 429:
                 print("Rate limited by Shopify. Sleeping for 2 seconds...")
@@ -219,29 +219,57 @@ def create_shopify_product(item, token):
             time.sleep(5)
 
 
+def update_shopify_product_category(product_id, category_name, title, token):
+    """Backfills product_type/tags on a product that already exists in Shopify."""
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    payload = {"product": {"id": product_id, "product_type": category_name, "tags": category_name}}
+
+    for attempt in range(3):
+        try:
+            res = requests.put(url, json=payload, headers=headers, timeout=15)
+            if res.status_code == 200:
+                print(f"🔧 Fixed category for '{title}' -> {category_name}")
+                return
+            elif res.status_code == 429:
+                time.sleep(2)
+            else:
+                print(f"✗ Failed to update category for '{title}': {res.text}")
+                break
+        except Exception as e:
+            print(f"⚠️ Network issue updating '{title}', retrying... ({e})")
+            time.sleep(5)
+
+
 def main():
     token = get_shopify_access_token()
     if not token:
         return
 
-    existing_skus = get_existing_shopify_skus(token)
+    existing_products = get_existing_shopify_products(token)
     products = fetch_supplier_products()
-
-    # --- DEBUG: print the raw structure of the FIRST product so we can ---
-    # --- confirm the exact category field name from the Actions log.   ---
-    if products:
-        print("\n===== RAW_SAMPLE_PRODUCT_JSON_START =====")
-        print(json.dumps(products[0], indent=2, ensure_ascii=False))
-        print("===== RAW_SAMPLE_PRODUCT_JSON_END =====\n")
 
     for product in products:
         base_sku = str(product.get("product_code") or product.get("id") or "")
+        title = product.get("name", "Untitled Product")
+        category_name = get_category_name(product)
 
-        if base_sku in existing_skus:
-            print(f"⏭️ Skipping {product.get('name')} (Already imported)")
+        if base_sku in existing_products:
+            info = existing_products[base_sku]
+            current_type = info["product_type"]
+
+            needs_fix = (not current_type or current_type.lower() == "uncategorized") and category_name != "Uncategorized"
+            if needs_fix:
+                update_shopify_product_category(info["id"], category_name, title, token)
+                time.sleep(0.5)
+            else:
+                print(f"⏭️ Skipping {title} (Already imported, category OK)")
             continue
 
-        create_shopify_product(product, token)
+        create_shopify_product(product, token, category_name)
         time.sleep(0.6)
 
 
