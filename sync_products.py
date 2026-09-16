@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 
 DROPSHIP_API_KEY = os.environ.get("DROPSHIP_API_KEY")
@@ -10,6 +11,7 @@ SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET")
 
 API_VERSION = "2026-04"
 BASE_SUPPLIER_URL = "https://mohasagor.com.bd/api/reseller/product"
+
 
 def get_shopify_access_token():
     token_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token"
@@ -26,27 +28,27 @@ def get_shopify_access_token():
         print(f"Failed to authenticate with Shopify: {e}")
     return None
 
+
 def get_existing_shopify_skus(token):
     """Fetches all existing base SKUs to allow safe resuming."""
     existing_base_skus = set()
     url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=variants"
     headers = {"X-Shopify-Access-Token": token}
-    
+
     print("Scanning Shopify to see what is already imported (so we can skip them)...")
     while url:
         try:
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 break
-            
+
             for product in response.json().get("products", []):
                 for variant in product.get("variants", []):
                     sku = str(variant.get("sku", ""))
                     if sku:
-                        # Grab the base SKU (before any dash for size/color variants)
                         base_sku = sku.split('-')[0]
                         existing_base_skus.add(base_sku)
-            
+
             link_header = response.headers.get("Link")
             url = None
             if link_header:
@@ -57,9 +59,10 @@ def get_existing_shopify_skus(token):
         except Exception as e:
             print(f"Network blip while scanning Shopify, continuing... ({e})")
             time.sleep(2)
-            
+
     print(f"Found {len(existing_base_skus)} unique products already in Shopify. Ready to resume!")
     return existing_base_skus
+
 
 def fetch_supplier_products():
     all_products = []
@@ -96,6 +99,45 @@ def fetch_supplier_products():
     print(f"Total products fetched from supplier: {len(all_products)}")
     return all_products
 
+
+def get_category_name(item):
+    """
+    Tries many possible field names / shapes the supplier might use for
+    category, since the API doesn't document an exact key.
+    """
+    candidate_keys = [
+        "category", "category_name", "categoryName", "cat_name",
+        "main_category", "main_category_name", "product_category",
+        "sub_category", "sub_category_name", "subcategory", "type",
+    ]
+
+    for key in candidate_keys:
+        val = item.get(key)
+        if not val:
+            continue
+
+        if isinstance(val, str):
+            cleaned = val.strip()
+            if cleaned:
+                return cleaned
+
+        elif isinstance(val, dict):
+            for name_key in ("name", "title", "label", "category_name"):
+                if val.get(name_key):
+                    return str(val[name_key]).strip()
+
+        elif isinstance(val, list) and val:
+            first = val[0]
+            if isinstance(first, str) and first.strip():
+                return first.strip()
+            if isinstance(first, dict):
+                for name_key in ("name", "title", "label"):
+                    if first.get(name_key):
+                        return str(first[name_key]).strip()
+
+    return "Uncategorized"
+
+
 def create_shopify_product(item, token):
     shopify_api_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json"
     shopify_headers = {
@@ -105,9 +147,8 @@ def create_shopify_product(item, token):
 
     title = item.get("name", "Untitled Product")
     body_html = item.get("details", "")
-    category_name = item.get("category", "")
-    if not category_name:
-        category_name = "Uncategorized"
+    category_name = get_category_name(item)
+    print(f"   category detected for '{title}': {category_name}")
 
     regular_price = float(item.get("price") or 0)
     sale_price = float(item.get("sale_price") or regular_price)
@@ -115,7 +156,7 @@ def create_shopify_product(item, token):
 
     image_urls = set()
     images_payload = []
-    
+
     thumb = item.get("thumbnail_img")
     if thumb and thumb.startswith("http"):
         image_urls.add(thumb)
@@ -161,44 +202,48 @@ def create_shopify_product(item, token):
         }
     }
 
-    # RETRY LOGIC: Try 3 times before giving up
     for attempt in range(3):
         try:
             res = requests.post(shopify_api_url, json=payload, headers=shopify_headers, timeout=15)
             if res.status_code == 201:
                 print(f"✓ Created: {title}")
-                return # Success! Exit the retry loop
+                return
             elif res.status_code == 429:
                 print("Rate limited by Shopify. Sleeping for 2 seconds...")
                 time.sleep(2)
             else:
                 print(f"✗ Failed: {title} | Error: {res.text}")
-                break # If it's a structural error (like bad data), don't retry
+                break
         except Exception as e:
             print(f"⚠️ Network connection dropped while sending '{title}'. Retrying in 5s... (Attempt {attempt + 1}/3)")
             time.sleep(5)
+
 
 def main():
     token = get_shopify_access_token()
     if not token:
         return
 
-    # 1. Fetch SKUs already synced successfully
     existing_skus = get_existing_shopify_skus(token)
-    
-    # 2. Fetch catalog
     products = fetch_supplier_products()
-    
-    # 3. Resume sync
+
+    # --- DEBUG: print the raw structure of the FIRST product so we can ---
+    # --- confirm the exact category field name from the Actions log.   ---
+    if products:
+        print("\n===== RAW_SAMPLE_PRODUCT_JSON_START =====")
+        print(json.dumps(products[0], indent=2, ensure_ascii=False))
+        print("===== RAW_SAMPLE_PRODUCT_JSON_END =====\n")
+
     for product in products:
         base_sku = str(product.get("product_code") or product.get("id") or "")
-        
+
         if base_sku in existing_skus:
             print(f"⏭️ Skipping {product.get('name')} (Already imported)")
             continue
-            
+
         create_shopify_product(product, token)
-        time.sleep(0.6) # Standard Shopify throttle
+        time.sleep(0.6)
+
 
 if __name__ == "__main__":
     main()
