@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import requests
 
 DROPSHIP_API_KEY = os.environ.get("DROPSHIP_API_KEY")
@@ -32,6 +33,26 @@ def normalize_title(title):
     return " ".join((title or "").strip().lower().split())
 
 
+def compute_prices(item):
+    """
+    item["price"]      = supplier's Customer/Retail price (সম্ভাব্য বিক্রয় মূল্য)
+                          -> this is what we actually charge the customer.
+    item["sale_price"]  = supplier's Dropshipper/cost price (ড্রপশিপার প্রাইজ)
+                          -> our cost. NEVER shown/charged to customers.
+
+    compare_at_price is a fabricated "regular price" 20-40% above the real
+    selling price, just to display a crossed-out discount ("offer").
+    """
+    retail_price = float(item.get("price") or 0)
+    if retail_price <= 0:
+        retail_price = float(item.get("sale_price") or 0)
+
+    markup_pct = random.uniform(0.20, 0.40)
+    compare_at_price = round((retail_price * (1 + markup_pct)) / 10) * 10
+
+    return retail_price, compare_at_price
+
+
 def delete_shopify_product(product_id, token):
     url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}.json"
     headers = {"X-Shopify-Access-Token": token}
@@ -52,25 +73,11 @@ def delete_shopify_product(product_id, token):
 
 
 def get_existing_catalog_and_cleanup(token):
-    """
-    Scans the FULL Shopify catalog once. Groups products by:
-      - base SKU (from variant SKUs)
-      - normalized title (since the supplier sometimes lists the exact
-        same product under multiple different codes/ids)
-
-    Any group with more than one product is a duplicate: we keep the best
-    copy (prefer one that already has a real category, else the oldest)
-    and DELETE the rest.
-
-    Returns:
-      existing_by_sku:   base_sku -> {"id":.., "product_type":..}
-      existing_titles:   set of normalized titles currently in the store
-    """
     all_products = []
     url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=id,title,product_type,created_at,variants"
     headers = {"X-Shopify-Access-Token": token}
 
-    print("Scanning full Shopify catalog (for existing categories + duplicates)...")
+    print("Scanning full Shopify catalog (categories, duplicates, prices)...")
     while url:
         try:
             response = requests.get(url, headers=headers, timeout=15)
@@ -79,8 +86,13 @@ def get_existing_catalog_and_cleanup(token):
 
             for product in response.json().get("products", []):
                 base_skus = set()
+                variants_info = []
                 for variant in product.get("variants", []):
                     sku = str(variant.get("sku", ""))
+                    variants_info.append({
+                        "id": variant.get("id"),
+                        "price": variant.get("price"),
+                    })
                     if sku:
                         base_skus.add(sku.split('-')[0])
 
@@ -91,6 +103,7 @@ def get_existing_catalog_and_cleanup(token):
                     "product_type": (product.get("product_type") or "").strip(),
                     "created_at": product.get("created_at") or "",
                     "base_skus": base_skus,
+                    "variants": variants_info,
                 })
 
             link_header = response.headers.get("Link")
@@ -136,7 +149,11 @@ def get_existing_catalog_and_cleanup(token):
         existing_titles.add(norm_title)
         for e in entries:
             for base_sku in e["base_skus"]:
-                existing_by_sku[base_sku] = {"id": keeper["id"], "product_type": keeper["product_type"]}
+                existing_by_sku[base_sku] = {
+                    "id": keeper["id"],
+                    "product_type": keeper["product_type"],
+                    "variants": keeper["variants"],
+                }
 
     print(f"Duplicate title-groups found: {dup_groups} | Extra duplicate products deleted: {dup_deleted}")
     return existing_by_sku, existing_titles
@@ -213,7 +230,6 @@ def get_category_name(item):
 
 
 def create_shopify_product(item, token, category_name):
-    """Returns the new Shopify product id on success, else None."""
     shopify_api_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json"
     shopify_headers = {
         "X-Shopify-Access-Token": token,
@@ -223,8 +239,7 @@ def create_shopify_product(item, token, category_name):
     title = item.get("name", "Untitled Product")
     body_html = item.get("details", "")
 
-    regular_price = float(item.get("price") or 0)
-    sale_price = float(item.get("sale_price") or regular_price)
+    retail_price, compare_at_price = compute_prices(item)
     base_sku = str(item.get("product_code") or item.get("id") or "")
 
     image_urls = set()
@@ -249,15 +264,15 @@ def create_shopify_product(item, token, category_name):
             v_name = str(rv.get("variant", "Default")).strip()
             variants_payload.append({
                 "option1": v_name,
-                "price": str(sale_price),
-                "compare_at_price": str(regular_price) if regular_price > sale_price else None,
+                "price": str(retail_price),
+                "compare_at_price": str(compare_at_price),
                 "sku": f"{base_sku}-{v_name}",
                 "inventory_management": None
             })
     else:
         variants_payload.append({
-            "price": str(sale_price),
-            "compare_at_price": str(regular_price) if regular_price > sale_price else None,
+            "price": str(retail_price),
+            "compare_at_price": str(compare_at_price),
             "sku": base_sku,
             "inventory_management": None
         })
@@ -280,7 +295,7 @@ def create_shopify_product(item, token, category_name):
             res = requests.post(shopify_api_url, json=payload, headers=shopify_headers, timeout=15)
             if res.status_code == 201:
                 new_id = res.json().get("product", {}).get("id")
-                print(f"✓ Created: {title} [{category_name}]")
+                print(f"✓ Created: {title} [{category_name}] Tk {retail_price} (was Tk {compare_at_price})")
                 return new_id
             elif res.status_code == 429:
                 print("Rate limited by Shopify. Sleeping for 2 seconds...")
@@ -318,6 +333,30 @@ def update_shopify_product_category(product_id, category_name, title, token):
             time.sleep(5)
 
 
+def update_shopify_variant_price(variant_id, price, compare_at_price, token):
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/variants/{variant_id}.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    payload = {"variant": {"id": variant_id, "price": str(price), "compare_at_price": str(compare_at_price)}}
+
+    for attempt in range(3):
+        try:
+            res = requests.put(url, json=payload, headers=headers, timeout=15)
+            if res.status_code == 200:
+                return True
+            elif res.status_code == 429:
+                time.sleep(2)
+            else:
+                print(f"✗ Failed to update price for variant {variant_id}: {res.text}")
+                return False
+        except Exception as e:
+            print(f"⚠️ Network issue updating price for variant {variant_id}, retrying... ({e})")
+            time.sleep(5)
+    return False
+
+
 def main():
     token = get_shopify_access_token()
     if not token:
@@ -331,17 +370,39 @@ def main():
         title = product.get("name", "Untitled Product")
         norm_title = normalize_title(title)
         category_name = get_category_name(product)
+        retail_price, compare_at_price = compute_prices(product)
 
         if base_sku in existing_by_sku:
             info = existing_by_sku[base_sku]
             current_type = info["product_type"]
-            needs_fix = (not current_type or current_type.lower() == "uncategorized") and category_name != "Uncategorized"
-            if needs_fix:
+
+            needs_category_fix = (not current_type or current_type.lower() == "uncategorized") and category_name != "Uncategorized"
+            if needs_category_fix:
                 update_shopify_product_category(info["id"], category_name, title, token)
                 info["product_type"] = category_name
-                time.sleep(0.5)
-            else:
-                print(f"⏭️ Skipping {title} (Already imported, category OK)")
+                time.sleep(0.4)
+
+            existing_variants = info.get("variants", [])
+            current_price = None
+            if existing_variants and existing_variants[0].get("price") is not None:
+                try:
+                    current_price = float(existing_variants[0]["price"])
+                except (TypeError, ValueError):
+                    current_price = None
+
+            needs_price_fix = current_price is None or abs(current_price - retail_price) > 0.5
+            if needs_price_fix and retail_price > 0:
+                fixed_any = False
+                for v in existing_variants:
+                    if v.get("id") and update_shopify_variant_price(v["id"], retail_price, compare_at_price, token):
+                        fixed_any = True
+                    time.sleep(0.4)
+                if fixed_any:
+                    print(f"💰 Fixed price for '{title}' -> Tk {retail_price} (was showing Tk {current_price})")
+
+            if not needs_category_fix and not needs_price_fix:
+                print(f"⏭️ Skipping {title} (Already imported, OK)")
+
             existing_titles.add(norm_title)
             continue
 
@@ -351,7 +412,7 @@ def main():
 
         new_id = create_shopify_product(product, token, category_name)
         if new_id:
-            existing_by_sku[base_sku] = {"id": new_id, "product_type": category_name}
+            existing_by_sku[base_sku] = {"id": new_id, "product_type": category_name, "variants": []}
             existing_titles.add(norm_title)
         time.sleep(0.6)
 
