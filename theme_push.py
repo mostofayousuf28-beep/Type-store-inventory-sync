@@ -69,10 +69,36 @@ put("templates/product.json", json.dumps(pj, ensure_ascii=False, indent=2))
 put("sections/footer-group.json", json.dumps({"type": "footer", "name": "Footer",
     "sections": {"nogor_footer": {"type": "nogor-footer", "settings": {}}}, "order": ["nogor_footer"]}, indent=2))
 
-# 5. announcement
-hg = get("sections/header-group.json")
-hg2 = hg.replace("Fast delivery across Dhaka", "সারা বাংলাদেশে হোম ডেলিভারি 🚚 · ক্যাশ অন ডেলিভারি")
-put("sections/header-group.json", hg2)
+# 5. header: announcement text (no emoji) + compact text-only category menu
+hgj = load_json(get("sections/header-group.json"))
+for sec in hgj["sections"].values():
+    for b in (sec.get("blocks") or {}).values():
+        st = b.get("settings") or {}
+        if b["type"] == "_header-menu":
+            st["menu_style"] = "text"
+        for bb in (b.get("blocks") or {}).values():
+            t = (bb.get("settings") or {}).get("text", "")
+            if "delivery" in t.lower() or "ডেলিভারি" in t:
+                bb["settings"]["text"] = "সারা বাংলাদেশে হোম ডেলিভারি  |  ক্যাশ অন ডেলিভারি"
+        if "text" in st and ("delivery" in st["text"].lower() or "ডেলিভারি" in st["text"]):
+            st["text"] = "সারা বাংলাদেশে হোম ডেলিভারি  |  ক্যাশ অন ডেলিভারি"
+put("sections/header-group.json", json.dumps(hgj, ensure_ascii=False, indent=2))
+
+# 5b. Winter card in "Explore Categories" with a placeholder image
+files = gql('{ files(first: 5, query: "filename:winter-placeholder*") { nodes { ... on MediaImage { id image { url } } } } }')
+if not files.get("data", {}).get("files", {}).get("nodes"):
+    src = "https://raw.githubusercontent.com/mostofayousuf28-beep/Type-store-inventory-sync/claude-setup/theme_assets/winter-placeholder.png"
+    print("upload placeholder:", json.dumps(gql("""mutation($f:[FileCreateInput!]!){ fileCreate(files:$f){ files{ id fileStatus } userErrors{ message } } }""",
+          {"f": [{"originalSource": src, "filename": "winter-placeholder.png", "contentType": "IMAGE"}]}).get("data"))[:300])
+    time.sleep(8)
+idx = load_json(get("templates/index.json"))
+tc = next(v for v in idx["sections"].values() if v["type"] == "custom-top-collections")
+if not any((b.get("settings") or {}).get("collection") == "winter" for b in tc["blocks"].values()):
+    tc["blocks"]["collection_winter"] = {"type": "collection", "settings": {"collection": "winter", "custom_image": "shopify://shop_images/winter-placeholder.png"}}
+    tc.setdefault("block_order", list(tc["blocks"].keys()))
+    if "collection_winter" not in tc["block_order"]:
+        tc["block_order"].append("collection_winter")
+put("templates/index.json", json.dumps(idx, ensure_ascii=False, indent=2))
 
 # 6. sale badge shows the real percentage
 cg = get("blocks/_product-card-gallery.liquid")

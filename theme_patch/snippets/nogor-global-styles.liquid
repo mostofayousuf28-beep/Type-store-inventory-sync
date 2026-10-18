@@ -8,12 +8,12 @@
     --font-body--family: {{ settings.type_body_font.family }}, 'Hind Siliguri', {{ settings.type_body_font.fallback_families }};
     --font-subheading--family: {{ settings.type_subheading_font.family }}, 'Hind Siliguri', {{ settings.type_subheading_font.fallback_families }};
     --font-heading--family: {{ settings.type_heading_font.family }}, 'Hind Siliguri', {{ settings.type_heading_font.fallback_families }};
-    --ne-green: #1f5c52;
-    --ne-green-dark: #164239;
+    --ne-green: #057668;
+    --ne-green-dark: #045a4f;
     --ne-slate: #4d5556;
     --ne-wa: #25d366;
     --ne-wa-dark: #128c4b;
-    --ne-soft: #eef4f2;
+    --ne-soft: #eaf4f2;
   }
 
   /* Sale badge: brand colour */
@@ -37,20 +37,15 @@
   main .rte p, main .text-block p { line-height: 1.7; }
 
   /* ---------- Order / trust block on product page ---------- */
-  .ne-order { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 2px; }
   .ne-btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    min-height: 48px; padding: 10px 14px; border-radius: 14px;
-    font-weight: 600; font-size: .95rem; text-decoration: none; line-height: 1.2;
-    transition: transform .15s ease, background-color .15s ease;
+    display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+    min-height: 50px; padding: 12px 16px; border-radius: 14px; margin: 2px 0;
+    font-weight: 600; font-size: 1rem; text-decoration: none; line-height: 1.2;
+    transition: background-color .15s ease;
   }
-  .ne-btn:hover { transform: translateY(-1px); }
-  .ne-btn svg { width: 20px; height: 20px; flex: none; }
-  .ne-btn--wa { background: var(--ne-wa); color: #fff; }
-  .ne-btn--wa:hover { background: var(--ne-wa-dark); color: #fff; }
-  .ne-btn--call { background: #fff; color: var(--ne-green); border: 1.5px solid var(--ne-green); }
-  .ne-btn--call:hover { background: var(--ne-soft); color: var(--ne-green-dark); }
-  @media (max-width: 420px) { .ne-order { grid-template-columns: 1fr; } }
+  .ne-btn svg { width: 22px; height: 22px; flex: none; }
+  .ne-btn--wa { background: var(--ne-green); color: #fff; }
+  .ne-btn--wa:hover { background: var(--ne-green-dark); color: #fff; }
 
   .ne-trust {
     list-style: none; margin: 6px 0 0; padding: 14px 16px; border-radius: 14px;
@@ -71,7 +66,7 @@
   }
   .ne-float a:hover { transform: scale(1.06); }
   .ne-float svg { width: 28px; height: 28px; }
-  .ne-float .ne-float__wa { background: var(--ne-wa); }
+  .ne-float .ne-float__wa { background: var(--ne-green); }
   .ne-float .ne-float__call { background: var(--ne-green); width: 46px; height: 46px; }
   .ne-float .ne-float__call svg { width: 22px; height: 22px; }
   @media (max-width: 749px) {

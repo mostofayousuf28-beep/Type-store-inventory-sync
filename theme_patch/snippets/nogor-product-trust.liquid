@@ -1,20 +1,15 @@
-{%- comment -%} WhatsApp / call order buttons + delivery trust list under Add to cart {%- endcomment -%}
+{%- comment -%} WhatsApp order button + delivery trust list under Add to cart {%- endcomment -%}
 {%- liquid
   assign ne_variant = product.selected_or_first_available_variant
   assign ne_msg = 'হ্যালো, আমি এই পণ্যটি অর্ডার করতে চাই: ' | append: product.title
   if ne_variant.sku != blank
     assign ne_msg = ne_msg | append: ' (কোড: ' | append: ne_variant.sku | append: ')'
   endif
-  assign ne_msg = ne_msg | append: ' — ' | append: shop.url | append: product.url
+  assign ne_msg = ne_msg | append: ' - ' | append: shop.url | append: product.url
 -%}
-<div class="ne-order">
-  <a class="ne-btn ne-btn--wa" href="https://wa.me/8801331616019?text={{ ne_msg | url_encode | replace: '+', '%20' }}" target="_blank" rel="noopener">
-    {% render 'nogor-icons', icon: 'whatsapp' %}<span>WhatsApp-এ অর্ডার</span>
-  </a>
-  <a class="ne-btn ne-btn--call" href="tel:+8801331616019">
-    {% render 'nogor-icons', icon: 'phone' %}<span>কল করুন</span>
-  </a>
-</div>
+<a class="ne-btn ne-btn--wa" href="https://wa.me/8801331616019?text={{ ne_msg | url_encode | replace: '+', '%20' }}" target="_blank" rel="noopener">
+  {% render 'nogor-icons', icon: 'whatsapp' %}<span>WhatsApp-এ অর্ডার করুন</span>
+</a>
 <ul class="ne-trust">
   <li>{% render 'nogor-icons', icon: 'cash' %}<span><b>ক্যাশ অন ডেলিভারি</b><small>পণ্য হাতে পেয়ে টাকা দিন</small></span></li>
   <li>{% render 'nogor-icons', icon: 'truck' %}<span><b>সারা বাংলাদেশে ডেলিভারি</b><small>ঢাকায় ৳৭০ · ঢাকার বাইরে ৳১৩০</small></span></li>

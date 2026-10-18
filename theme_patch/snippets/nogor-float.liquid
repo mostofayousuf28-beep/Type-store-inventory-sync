@@ -1,7 +1,7 @@
 {%- liquid
   assign ne_float_msg = 'হ্যালো Nogor Essentials, আমি একটি অর্ডারের ব্যাপারে জানতে চাই।'
   if template.name == 'product'
-    assign ne_float_msg = 'হ্যালো, এই পণ্যটি সম্পর্কে জানতে চাই: ' | append: product.title | append: ' — ' | append: shop.url | append: product.url
+    assign ne_float_msg = 'হ্যালো, এই পণ্যটি সম্পর্কে জানতে চাই: ' | append: product.title | append: ' - ' | append: shop.url | append: product.url
   endif
 -%}
 <div class="ne-float{% if template.name == 'product' %} ne-float--product{% endif %}">
