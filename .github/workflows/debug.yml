@@ -1,0 +1,16 @@
+name: Debug inspect supplier API
+on:
+  push:
+    branches: [claude-debug]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install requests
+      - run: python debug_inspect.py
+        env:
+          DROPSHIP_API_KEY: ${{ secrets.DROPSHIP_API_KEY }}
+          DROPSHIP_SECRET_KEY: ${{ secrets.DROPSHIP_SECRET_KEY }}
