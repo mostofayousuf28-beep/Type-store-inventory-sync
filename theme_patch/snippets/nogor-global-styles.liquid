@@ -94,4 +94,12 @@
     }
     .menu-list__submenu .mega-menu__link:hover { background: var(--ne-soft); color: var(--ne-green) !important; }
   }
+  /* ---------- Product cards: square images, 3-line titles, equal heights ---------- */
+  .product-card__content > a.contents .text-block p {
+    display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden; line-height: 1.45; min-height: calc(1.45em * 3); margin: 0;
+  }
+  .product-card:has(.nogor-save-badge) .product-badges { display: none !important; }
+  .resource-list__item, .resource-list__item > product-card-link { height: 100%; }
+  .resource-list__item product-card { height: 100%; }
 </style>

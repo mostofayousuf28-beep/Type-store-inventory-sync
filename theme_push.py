@@ -1,7 +1,7 @@
 """Copy the live theme, apply Nogor design changes to the COPY, print a preview link. Live theme is not touched."""
 import os, re, json, time, requests, pathlib
 DOM = os.environ["SHOPIFY_STORE_DOMAIN"]; V = "2026-04"
-DRAFT = "Nogor Design (draft)"
+DRAFT = os.environ.get("THEME_NAME", "Nogor Design")
 tok = requests.post(f"https://{DOM}/admin/oauth/access_token", data={"grant_type": "client_credentials",
       "client_id": os.environ["SHOPIFY_CLIENT_ID"], "client_secret": os.environ["SHOPIFY_CLIENT_SECRET"]}, timeout=20).json()["access_token"]
 H = {"X-Shopify-Access-Token": tok, "Content-Type": "application/json"}
@@ -117,5 +117,27 @@ cg = get("blocks/_product-card-gallery.liquid")
 cg = cg.replace("{{ 'content.product_badge_sale' | t }}",
     "{%- assign ne_off = product.compare_at_price | minus: product.price | times: 100 | divided_by: product.compare_at_price -%}-{{ ne_off }}%")
 put("blocks/_product-card-gallery.liquid", cg)
+
+# 7. every product card image is square
+def _square(node):
+    n = 0
+    if isinstance(node, dict):
+        if node.get("type") == "_product-card-gallery":
+            st = node.setdefault("settings", {})
+            if st.get("image_ratio") != "square":
+                st["image_ratio"] = "square"; n += 1
+        for v in node.values():
+            n += _square(v)
+    elif isinstance(node, list):
+        for v in node:
+            n += _square(v)
+    return n
+for key in ["templates/index.json", "templates/collection.json", "templates/search.json", "templates/product.json", "templates/cart.json", "templates/404.json"]:
+    try:
+        j = load_json(get(key))
+    except Exception as e:
+        print("  skip", key, e); continue
+    if _square(j):
+        put(key, json.dumps(j, ensure_ascii=False, indent=2))
 
 print("\nPREVIEW:", f"https://nogoressetials.com/?preview_theme_id={tid}")
