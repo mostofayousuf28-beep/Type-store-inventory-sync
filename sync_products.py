@@ -28,6 +28,8 @@ import sys
 import time
 
 import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # ---------------------------------------------------------------- settings
 MIN_MARKUP = float(os.environ.get("MIN_MARKUP", "1.70"))          # at least 70% profit on cost
@@ -37,6 +39,7 @@ VENDOR = "Supplier"
 API_VERSION = "2026-04"
 SUPPLIER_URL = "https://mohasagor.com.bd/api/reseller/product"
 MAX_WRITE_FAILURES = 25   # more failed Shopify writes than this -> mark the run as failed
+CREATE_WORKERS = int(os.environ.get("CREATE_WORKERS", "6"))  # parallel product creates (image download is the slow part)
 
 DROPSHIP_API_KEY = os.environ.get("DROPSHIP_API_KEY")
 DROPSHIP_SECRET_KEY = os.environ.get("DROPSHIP_SECRET_KEY")
@@ -197,6 +200,7 @@ class Shopify:
         self.base = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}"
         self.token = self._token()
         self.write_failures = 0
+        self._lock = threading.Lock()
 
     def _token(self):
         r = requests.post(
@@ -295,7 +299,8 @@ class Shopify:
     def _ok(self, r, what):
         if r is not None and r.status_code in (200, 201):
             return r
-        self.write_failures += 1
+        with self._lock:
+            self.write_failures += 1
         print(f"  ✗ {what}: {r.status_code if r is not None else 'no response'} {r.text[:300] if r is not None else ''}")
         return None
 
@@ -445,6 +450,7 @@ def main():
     reason_counts = {}
     hashes_to_save = []
     samples = []
+    to_create = []
 
     def log(line):
         if len(samples) < 40:
@@ -477,9 +483,7 @@ def main():
         if p is None:
             stats["created"] += 1
             log(f"✨ new: {d['title']} | Tk {d['price']} (was {d['compare_at']})")
-            if not DRY_RUN:
-                shop.create_product(d)
-                time.sleep(0.5)
+            to_create.append(d)
             continue
 
         payload, var_updates, new_hash, reasons = plan_update(p, d)
@@ -506,6 +510,18 @@ def main():
                     shop.update_variant(v["id"], d["price"], d["compare_at"], f"price {d['title']}")
         if new_hash:
             hashes_to_save.append((p["id"], new_hash))
+
+    if not DRY_RUN and to_create:
+        print(f"Creating {len(to_create)} new products with {CREATE_WORKERS} parallel workers...")
+        done = [0]
+        def _create(d):
+            shop.create_product(d)
+            with shop._lock:
+                done[0] += 1
+                if done[0] % 100 == 0:
+                    print(f"  ... {done[0]}/{len(to_create)} created")
+        with ThreadPoolExecutor(max_workers=CREATE_WORKERS) as ex:
+            list(ex.map(_create, to_create))
 
     if not DRY_RUN and hashes_to_save:
         shop.set_hashes(hashes_to_save)
