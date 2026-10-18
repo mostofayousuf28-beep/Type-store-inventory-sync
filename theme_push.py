@@ -91,6 +91,9 @@ if not files.get("data", {}).get("files", {}).get("nodes"):
     print("upload placeholder:", json.dumps(gql("""mutation($f:[FileCreateInput!]!){ fileCreate(files:$f){ files{ id fileStatus } userErrors{ message } } }""",
           {"f": [{"originalSource": src, "filename": "winter-placeholder.png", "contentType": "IMAGE"}]}).get("data"))[:300])
     time.sleep(8)
+sec = get("sections/custom-top-collections.liquid")
+if '"limit": 8' in sec:
+    put("sections/custom-top-collections.liquid", sec.replace('"limit": 8', '"limit": 12'))
 idx = load_json(get("templates/index.json"))
 tc = next(v for v in idx["sections"].values() if v["type"] == "custom-top-collections")
 if not any((b.get("settings") or {}).get("collection") == "winter" for b in tc["blocks"].values()):
