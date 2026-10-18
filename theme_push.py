@@ -7,11 +7,19 @@ tok = requests.post(f"https://{DOM}/admin/oauth/access_token", data={"grant_type
 H = {"X-Shopify-Access-Token": tok, "Content-Type": "application/json"}
 B = f"https://{DOM}/admin/api/{V}"
 
+def rq(method, url, **kw):
+    for a in range(12):
+        r = requests.request(method, url, headers=H, timeout=60, **kw)
+        if r.status_code == 429 or r.status_code >= 500:
+            time.sleep(min(3 + a * 2, 20)); continue
+        return r
+    return r
+
 def gql(q, v=None):
-    return requests.post(f"{B}/graphql.json", headers=H, json={"query": q, "variables": v or {}}, timeout=60).json()
+    return rq("POST", f"{B}/graphql.json", json={"query": q, "variables": v or {}}).json()
 
 for _a in range(10):
-    _tr = requests.get(f"{B}/themes.json", headers=H)
+    _tr = rq("GET", f"{B}/themes.json")
     if "themes" in _tr.json(): break
     time.sleep(3 + _a)
 if "themes" not in _tr.json():
@@ -33,14 +41,14 @@ if not draft:
 else:
     tid = draft["id"]; print("reusing draft", tid)
 for _ in range(60):
-    t = requests.get(f"{B}/themes/{tid}.json", headers=H).json()["theme"]
+    t = rq("GET", f"{B}/themes/{tid}.json").json()["theme"]
     if not t.get("processing"): break
     time.sleep(5)
 print("draft theme:", tid, "processing:", t.get("processing"))
 
 def get(key):
     for a in range(10):
-        r = requests.get(f"{B}/themes/{tid}/assets.json", headers=H, params={"asset[key]": key})
+        r = rq("GET", f"{B}/themes/{tid}/assets.json", params={"asset[key]": key})
         if r.status_code == 429 or "asset" not in r.json():
             time.sleep(3 + a); continue
         return r.json()["asset"]["value"]
@@ -48,7 +56,7 @@ def get(key):
 
 def put(key, value):
     for a in range(10):
-        r = requests.put(f"{B}/themes/{tid}/assets.json", headers=H, json={"asset": {"key": key, "value": value}})
+        r = rq("PUT", f"{B}/themes/{tid}/assets.json", json={"asset": {"key": key, "value": value}})
         if r.status_code == 429: time.sleep(3 + a); continue
         print("  put", key, r.status_code, "" if r.ok else r.text[:300]); return r.ok
 
