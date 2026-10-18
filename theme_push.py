@@ -98,6 +98,11 @@ if '"max_blocks"' not in sec:
     sec = sec.replace('"name": "Top 8 Categories",', '"name": "Top Categories",\n  "max_blocks": 12,', 1)
     put("sections/custom-top-collections.liquid", sec)
     time.sleep(20)
+sec = get("sections/custom-top-collections.liquid")
+new_css = open("theme_patch/cat_styles.css").read()
+sec2 = re.sub(r"<style>.*?</style>", lambda m: new_css.strip(), sec, count=1, flags=re.S)
+if sec2 != sec:
+    put("sections/custom-top-collections.liquid", sec2)
 idx = load_json(get("templates/index.json"))
 tc = next(v for v in idx["sections"].values() if v["type"] == "custom-top-collections")
 if not any((b.get("settings") or {}).get("collection") == "winter" for b in tc["blocks"].values()):
