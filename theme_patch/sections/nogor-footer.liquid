@@ -27,7 +27,7 @@
       <h3>ক্যাটাগরি</h3>
       <ul>
         {%- if ne_cats != blank -%}
-          {%- for l in ne_cats limit: 9 -%}<li><a href="{{ l.url }}">{{ l.title }}</a></li>{%- endfor -%}
+          {%- for l in ne_cats limit: 14 -%}<li><a href="{{ l.url }}">{{ l.title }}</a></li>{%- endfor -%}
         {%- endif -%}
         <li><a href="{{ routes.all_products_collection_url }}">সব পণ্য</a></li>
       </ul>

@@ -8,7 +8,7 @@
   assign ne_msg = ne_msg | append: ' — ' | append: shop.url | append: product.url
 -%}
 <div class="ne-order">
-  <a class="ne-btn ne-btn--wa" href="https://wa.me/8801331616019?text={{ ne_msg | url_encode }}" target="_blank" rel="noopener">
+  <a class="ne-btn ne-btn--wa" href="https://wa.me/8801331616019?text={{ ne_msg | url_encode | replace: '+', '%20' }}" target="_blank" rel="noopener">
     {% render 'nogor-icons', icon: 'whatsapp' %}<span>WhatsApp-এ অর্ডার</span>
   </a>
   <a class="ne-btn ne-btn--call" href="tel:+8801331616019">
