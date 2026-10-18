@@ -13,13 +13,14 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip install requests
-      - run: python inspect2.py > out.txt 2>&1 || true
+      - run: python sync_products.py > out.txt 2>&1 || true
         env:
           DROPSHIP_API_KEY: ${{ secrets.DROPSHIP_API_KEY }}
           DROPSHIP_SECRET_KEY: ${{ secrets.DROPSHIP_SECRET_KEY }}
           SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          DRY_RUN: "1"
       - name: Encrypt output (only Claude's private key can read it)
         run: |
           mkdir -p debug_out
