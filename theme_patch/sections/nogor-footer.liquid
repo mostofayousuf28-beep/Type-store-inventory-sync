@@ -1,0 +1,117 @@
+{%- liquid
+  assign ne_cats = blank
+  for link in linklists['main-menu'].links
+    if link.links.size > 0
+      assign ne_cats = link.links
+      break
+    endif
+  endfor
+-%}
+<footer class="ne-footer">
+  <div class="ne-footer__inner">
+    <div class="ne-footer__brand">
+      <a href="{{ routes.root_url }}" class="ne-footer__logo">
+        {%- if settings.logo != blank -%}
+          {{ settings.logo | image_url: width: 240 | image_tag: alt: shop.name, loading: 'lazy', width: 88, height: 88 }}
+        {%- endif -%}
+        <span>Nogor Essentials</span>
+      </a>
+      <p>শহর আপনার, কন্ট্রোলও আপনার। ঢাকার লাইফ ইজি করতে প্রতিদিনের প্রয়োজনীয় সব পণ্য এক জায়গায়।</p>
+      <div class="ne-footer__social">
+        <a href="https://www.facebook.com/profile.php?id=61565789341267" target="_blank" rel="noopener" aria-label="Facebook">{% render 'nogor-icons', icon: 'facebook' %}</a>
+        <a href="https://wa.me/8801331616019" target="_blank" rel="noopener" aria-label="WhatsApp">{% render 'nogor-icons', icon: 'whatsapp' %}</a>
+      </div>
+    </div>
+
+    <nav class="ne-footer__col" aria-label="ক্যাটাগরি">
+      <h3>ক্যাটাগরি</h3>
+      <ul>
+        {%- if ne_cats != blank -%}
+          {%- for l in ne_cats limit: 9 -%}<li><a href="{{ l.url }}">{{ l.title }}</a></li>{%- endfor -%}
+        {%- endif -%}
+        <li><a href="{{ routes.all_products_collection_url }}">সব পণ্য</a></li>
+      </ul>
+    </nav>
+
+    <nav class="ne-footer__col" aria-label="সহায়তা">
+      <h3>সহায়তা</h3>
+      <ul>
+        <li><a href="/pages/contact">যোগাযোগ</a></li>
+        {%- for policy in shop.policies -%}
+          {%- liquid
+            assign t = policy.title
+            if policy.url contains 'refund'
+              assign t = 'রিটার্ন ও রিফান্ড নীতি'
+            elsif policy.url contains 'privacy'
+              assign t = 'গোপনীয়তা নীতি'
+            elsif policy.url contains 'terms'
+              assign t = 'ব্যবহারের শর্তাবলী'
+            elsif policy.url contains 'shipping'
+              assign t = 'ডেলিভারি নীতি'
+            endif
+          -%}
+          <li><a href="{{ policy.url }}">{{ t }}</a></li>
+        {%- endfor -%}
+        <li><a href="{{ routes.account_url }}">আমার অর্ডার</a></li>
+      </ul>
+    </nav>
+
+    <div class="ne-footer__col">
+      <h3>যোগাযোগ</h3>
+      <ul class="ne-footer__contact">
+        <li><a href="tel:+8801331616019">{% render 'nogor-icons', icon: 'phone' %}<span>01331-616019</span></a></li>
+        <li><a href="https://wa.me/8801331616019" target="_blank" rel="noopener">{% render 'nogor-icons', icon: 'whatsapp' %}<span>WhatsApp-এ মেসেজ</span></a></li>
+        <li><a href="https://www.facebook.com/profile.php?id=61565789341267" target="_blank" rel="noopener">{% render 'nogor-icons', icon: 'facebook' %}<span>Facebook পেজ</span></a></li>
+        <li><span class="ne-footer__plain">{% render 'nogor-icons', icon: 'pin' %}<span>Dhaka, Bangladesh</span></span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="ne-footer__bar">
+    <div class="ne-footer__bar-inner">
+      <span>© {{ 'now' | date: '%Y' }} Nogor Essentials. সর্বস্বত্ব সংরক্ষিত।</span>
+      <span class="ne-footer__pay">{% render 'nogor-icons', icon: 'cash' %} ক্যাশ অন ডেলিভারি</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .ne-footer { background: var(--ne-slate, #4d5556); color: #e9eeed; margin-top: 0; }
+  .ne-footer a { color: inherit; text-decoration: none; }
+  .ne-footer a:hover { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+  .ne-footer__inner {
+    max-width: var(--page-width, 1400px); margin: 0 auto; padding: 56px var(--page-margin, 20px) 40px;
+    display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 40px;
+  }
+  .ne-footer__logo { display: inline-flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.25rem; color: #fff; }
+  .ne-footer__logo img { width: 64px; height: 64px; border-radius: 50%; background: #fff; object-fit: contain; }
+  .ne-footer__brand p { margin: 14px 0 18px; font-size: .95rem; line-height: 1.7; color: #d3dbd9; max-width: 34ch; }
+  .ne-footer__social { display: flex; gap: 10px; }
+  .ne-footer__social a { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.1); }
+  .ne-footer__social a:hover { background: rgba(255,255,255,.22); text-decoration: none; }
+  .ne-footer__social svg { width: 20px; height: 20px; }
+  .ne-footer h3 { color: #fff; font-size: 1rem; font-weight: 700; margin: 6px 0 16px; letter-spacing: .01em; }
+  .ne-footer ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: .93rem; }
+  .ne-footer__contact a, .ne-footer__plain { display: inline-flex; align-items: center; gap: 10px; }
+  .ne-footer__contact svg { width: 18px; height: 18px; flex: none; opacity: .9; }
+  .ne-footer__bar { border-top: 1px solid rgba(255,255,255,.14); }
+  .ne-footer__bar-inner {
+    max-width: var(--page-width, 1400px); margin: 0 auto; padding: 16px var(--page-margin, 20px);
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: .85rem; color: #c5cecc;
+  }
+  .ne-footer__pay { display: inline-flex; align-items: center; gap: 8px; }
+  .ne-footer__pay svg { width: 20px; height: 20px; }
+  @media (max-width: 989px) { .ne-footer__inner { grid-template-columns: 1fr 1fr; } .ne-footer__brand { grid-column: 1 / -1; } }
+  @media (max-width: 560px) {
+    .ne-footer__inner { grid-template-columns: 1fr 1fr; gap: 28px 20px; padding-top: 40px; padding-bottom: 28px; }
+    .ne-footer__col:last-child { grid-column: 1 / -1; }
+    .ne-footer__bar-inner { justify-content: center; text-align: center; padding-bottom: 84px; }
+  }
+</style>
+
+{% schema %}
+{
+  "name": "Nogor footer",
+  "settings": []
+}
+{% endschema %}

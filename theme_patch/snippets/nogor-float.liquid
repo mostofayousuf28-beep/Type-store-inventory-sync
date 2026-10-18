@@ -1,0 +1,10 @@
+{%- liquid
+  assign ne_float_msg = 'হ্যালো Nogor Essentials, আমি একটি অর্ডারের ব্যাপারে জানতে চাই।'
+  if template.name == 'product'
+    assign ne_float_msg = 'হ্যালো, এই পণ্যটি সম্পর্কে জানতে চাই: ' | append: product.title | append: ' — ' | append: shop.url | append: product.url
+  endif
+-%}
+<div class="ne-float{% if template.name == 'product' %} ne-float--product{% endif %}">
+  <a class="ne-float__call" href="tel:+8801331616019" aria-label="কল করুন 01331616019">{% render 'nogor-icons', icon: 'phone' %}</a>
+  <a class="ne-float__wa" href="https://wa.me/8801331616019?text={{ ne_float_msg | url_encode }}" target="_blank" rel="noopener" aria-label="WhatsApp-এ মেসেজ করুন">{% render 'nogor-icons', icon: 'whatsapp' %}</a>
+</div>
