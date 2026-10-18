@@ -10,7 +10,10 @@ B = f"https://{DOM}/admin/api/{V}"
 def gql(q, v=None):
     return requests.post(f"{B}/graphql.json", headers=H, json={"query": q, "variables": v or {}}, timeout=60).json()
 
-_tr = requests.get(f"{B}/themes.json", headers=H)
+for _a in range(10):
+    _tr = requests.get(f"{B}/themes.json", headers=H)
+    if "themes" in _tr.json(): break
+    time.sleep(3 + _a)
 if "themes" not in _tr.json():
     print("themes.json:", _tr.status_code, _tr.text[:300])
     print("scopes:", requests.get(f"https://{DOM}/admin/oauth/access_scopes.json", headers=H).text[:400])
@@ -36,13 +39,17 @@ for _ in range(60):
 print("draft theme:", tid, "processing:", t.get("processing"))
 
 def get(key):
-    r = requests.get(f"{B}/themes/{tid}/assets.json", headers=H, params={"asset[key]": key})
-    return r.json()["asset"]["value"]
+    for a in range(10):
+        r = requests.get(f"{B}/themes/{tid}/assets.json", headers=H, params={"asset[key]": key})
+        if r.status_code == 429 or "asset" not in r.json():
+            time.sleep(3 + a); continue
+        return r.json()["asset"]["value"]
+    raise SystemExit(f"could not read {key}: {r.status_code} {r.text[:200]}")
 
 def put(key, value):
-    for a in range(5):
+    for a in range(10):
         r = requests.put(f"{B}/themes/{tid}/assets.json", headers=H, json={"asset": {"key": key, "value": value}})
-        if r.status_code == 429: time.sleep(2); continue
+        if r.status_code == 429: time.sleep(3 + a); continue
         print("  put", key, r.status_code, "" if r.ok else r.text[:300]); return r.ok
 
 def load_json(s):
