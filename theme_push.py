@@ -10,7 +10,12 @@ B = f"https://{DOM}/admin/api/{V}"
 def gql(q, v=None):
     return requests.post(f"{B}/graphql.json", headers=H, json={"query": q, "variables": v or {}}, timeout=60).json()
 
-themes = requests.get(f"{B}/themes.json", headers=H).json()["themes"]
+_tr = requests.get(f"{B}/themes.json", headers=H)
+if "themes" not in _tr.json():
+    print("themes.json:", _tr.status_code, _tr.text[:300])
+    print("scopes:", requests.get(f"https://{DOM}/admin/oauth/access_scopes.json", headers=H).text[:400])
+    raise SystemExit(1)
+themes = _tr.json()["themes"]
 live = [t for t in themes if t["role"] == "main"][0]
 print("live theme:", live["id"], live["name"])
 draft = next((t for t in themes if t["name"] == DRAFT), None)
