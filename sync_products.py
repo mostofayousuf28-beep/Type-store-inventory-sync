@@ -1,7 +1,42 @@
+"""
+Supplier (mohasagor / dropshipping.com.bd) -> Shopify (nogoressentials.com) product sync.
+
+Rules
+-----
+* A product is identified ONLY by the supplier product_code (Shopify SKU = "<code>" or "<code>-<variant>").
+  Titles are never used for matching, so two different products with the same name are both kept.
+* Title on Shopify = "<supplier name> - <product_code>".
+* Selling price  = max(supplier retail price, dropshipper cost x MIN_MARKUP), rounded UP to the next 10.
+  (supplier "price" = Customer/Retail price, supplier "sale_price" = Dropshipper price / our cost)
+* Compare-at ("crossed out") price = selling price x (1 + COMPARE_AT_PCT), rounded UP to the next 10.
+* Every run: price, compare-at, title, details, category, images and variants are brought in line with the supplier.
+  Only products that actually changed are written.
+* Supplier no longer lists a product  -> Shopify product is set to DRAFT (hidden, never deleted).
+  Supplier lists it again               -> set back to ACTIVE.
+* Only products with vendor "Supplier" are touched; anything added by hand on Shopify is left alone.
+* If the supplier API cannot be read completely, the run stops BEFORE changing anything and the
+  GitHub Action is marked as failed (GitHub then emails you).
+
+Set DRY_RUN=1 to only print what would change.
+"""
+
+import hashlib
+import json
+import math
 import os
+import sys
 import time
-import random
+
 import requests
+
+# ---------------------------------------------------------------- settings
+MIN_MARKUP = float(os.environ.get("MIN_MARKUP", "1.70"))          # at least 70% profit on cost
+COMPARE_AT_PCT = float(os.environ.get("COMPARE_AT_PCT", "0.30"))  # crossed-out price 30% above selling price
+DRY_RUN = os.environ.get("DRY_RUN", "").strip() not in ("", "0", "false", "False")
+VENDOR = "Supplier"
+API_VERSION = "2026-04"
+SUPPLIER_URL = "https://mohasagor.com.bd/api/reseller/product"
+MAX_WRITE_FAILURES = 25   # more failed Shopify writes than this -> mark the run as failed
 
 DROPSHIP_API_KEY = os.environ.get("DROPSHIP_API_KEY")
 DROPSHIP_SECRET_KEY = os.environ.get("DROPSHIP_SECRET_KEY")
@@ -9,413 +44,488 @@ SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID")
 SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET")
 
-API_VERSION = "2026-04"
-BASE_SUPPLIER_URL = "https://mohasagor.com.bd/api/reseller/product"
+HASH_NS, HASH_KEY = "sync", "hash"
 
 
-def get_shopify_access_token():
-    token_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token"
-    payload = {
-        "grant_type": "client_credentials",
-        "client_id": SHOPIFY_CLIENT_ID,
-        "client_secret": SHOPIFY_CLIENT_SECRET,
-    }
-    try:
-        response = requests.post(token_url, data=payload, timeout=10)
-        if response.status_code == 200:
-            return response.json().get("access_token")
-    except Exception as e:
-        print(f"Failed to authenticate with Shopify: {e}")
-    return None
+class SyncAbort(Exception):
+    pass
 
 
-def normalize_title(title):
-    return " ".join((title or "").strip().lower().split())
+# ---------------------------------------------------------------- helpers
+def round_up_10(x):
+    return int(math.ceil(float(x) / 10.0) * 10)
 
 
 def compute_prices(item):
-    """
-    item["price"]      = supplier's Customer/Retail price (সম্ভাব্য বিক্রয় মূল্য)
-                          -> this is what we actually charge the customer.
-    item["sale_price"]  = supplier's Dropshipper/cost price (ড্রপশিপার প্রাইজ)
-                          -> our cost. NEVER shown/charged to customers.
-
-    compare_at_price is a fabricated "regular price" 20-40% above the real
-    selling price, just to display a crossed-out discount ("offer").
-    """
-    retail_price = float(item.get("price") or 0)
-    if retail_price <= 0:
-        retail_price = float(item.get("sale_price") or 0)
-
-    markup_pct = random.uniform(0.20, 0.40)
-    compare_at_price = round((retail_price * (1 + markup_pct)) / 10) * 10
-
-    return retail_price, compare_at_price
+    retail = float(item.get("price") or 0)
+    cost = float(item.get("sale_price") or 0)
+    if cost <= 0 and retail <= 0:
+        return None, None
+    floor_price = cost * MIN_MARKUP if cost > 0 else 0
+    sell = round_up_10(max(retail, floor_price))
+    compare_at = round_up_10(sell * (1 + COMPARE_AT_PCT))
+    return sell, compare_at
 
 
-def delete_shopify_product(product_id, token):
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}.json"
-    headers = {"X-Shopify-Access-Token": token}
-    for attempt in range(3):
-        try:
-            res = requests.delete(url, headers=headers, timeout=15)
-            if res.status_code in (200, 404):
-                print(f"🗑️ Deleted duplicate product id {product_id}")
-                return
-            elif res.status_code == 429:
-                time.sleep(2)
-            else:
-                print(f"✗ Failed to delete duplicate product {product_id}: {res.text}")
-                break
-        except Exception as e:
-            print(f"⚠️ Network issue deleting product {product_id}, retrying... ({e})")
-            time.sleep(5)
+def short_hash(obj):
+    return hashlib.sha1(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
 
 
-def get_existing_catalog_and_cleanup(token):
-    all_products = []
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json?limit=250&fields=id,title,product_type,created_at,variants"
-    headers = {"X-Shopify-Access-Token": token}
-
-    print("Scanning full Shopify catalog (categories, duplicates, prices)...")
-    while url:
-        try:
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                break
-
-            for product in response.json().get("products", []):
-                base_skus = set()
-                variants_info = []
-                for variant in product.get("variants", []):
-                    sku = str(variant.get("sku", ""))
-                    variants_info.append({
-                        "id": variant.get("id"),
-                        "price": variant.get("price"),
-                    })
-                    if sku:
-                        base_skus.add(sku.split('-')[0])
-
-                all_products.append({
-                    "id": product.get("id"),
-                    "title": product.get("title", ""),
-                    "norm_title": normalize_title(product.get("title", "")),
-                    "product_type": (product.get("product_type") or "").strip(),
-                    "created_at": product.get("created_at") or "",
-                    "base_skus": base_skus,
-                    "variants": variants_info,
-                })
-
-            link_header = response.headers.get("Link")
-            url = None
-            if link_header:
-                for link in link_header.split(","):
-                    if 'rel="next"' in link:
-                        url = link[link.find("<")+1:link.find(">")]
-                        break
-        except Exception as e:
-            print(f"Network blip while scanning Shopify, continuing... ({e})")
-            time.sleep(2)
-
-    print(f"Total products currently in Shopify: {len(all_products)}")
-
-    title_groups = {}
-    for p in all_products:
-        title_groups.setdefault(p["norm_title"], []).append(p)
-
-    existing_by_sku = {}
-    existing_titles = set()
-    dup_groups = 0
-    dup_deleted = 0
-
-    for norm_title, entries in title_groups.items():
-        if not norm_title:
-            continue
-
-        if len(entries) > 1:
-            dup_groups += 1
-            with_category = [e for e in entries if e["product_type"] and e["product_type"].lower() != "uncategorized"]
-            pool = with_category if with_category else entries
-            keeper = sorted(pool, key=lambda e: e["created_at"])[0]
-
-            for e in entries:
-                if e["id"] != keeper["id"]:
-                    delete_shopify_product(e["id"], token)
-                    dup_deleted += 1
-                    time.sleep(0.5)
-        else:
-            keeper = entries[0]
-
-        existing_titles.add(norm_title)
-        for e in entries:
-            for base_sku in e["base_skus"]:
-                existing_by_sku[base_sku] = {
-                    "id": keeper["id"],
-                    "product_type": keeper["product_type"],
-                    "variants": keeper["variants"],
-                }
-
-    print(f"Duplicate title-groups found: {dup_groups} | Extra duplicate products deleted: {dup_deleted}")
-    return existing_by_sku, existing_titles
+def code_of(item):
+    return str(item.get("product_code") or "").strip()
 
 
+def build_title(item):
+    name = " ".join(str(item.get("name") or "Untitled Product").split())
+    return f"{name} - {code_of(item)}"
+
+
+def image_urls(item):
+    urls = []
+    thumb = item.get("thumbnail_img") or ""
+    if thumb.startswith("http"):
+        urls.append(thumb)
+    for img in item.get("product_images") or []:
+        u = (img or {}).get("product_image") or ""
+        if u.startswith("http") and u not in urls:
+            urls.append(u)
+    return urls
+
+
+def variant_list(item):
+    """[(option_name, value)] in supplier order, de-duplicated."""
+    out, seen = [], set()
+    for v in item.get("product_variants") or []:
+        val = " ".join(str(v.get("variant") or "").split())
+        if val and val.lower() not in seen:
+            seen.add(val.lower())
+            out.append((str(v.get("attribute") or "Option").strip() or "Option", val))
+    return out
+
+
+def sku_for(code, value=None):
+    return f"{code}-{value}" if value else code
+
+
+def desired_state(item):
+    code = code_of(item)
+    sell, compare_at = compute_prices(item)
+    variants = variant_list(item)
+    category = str(item.get("category") or "").strip() or "Uncategorized"
+    content = {"t": build_title(item), "d": item.get("details") or "", "c": category}
+    imgs = image_urls(item)
+    return {
+        "code": code,
+        "title": content["t"],
+        "body_html": content["d"],
+        "category": category,
+        "price": sell,
+        "compare_at": compare_at,
+        "variants": variants,
+        "option_name": variants[0][0] if variants else None,
+        "images": imgs,
+        "hash": {
+            "c": short_hash(content),
+            "i": short_hash(imgs),
+            "v": short_hash([v for _, v in variants]),
+        },
+    }
+
+
+def encode_hash(h, drafted_by_sync=False):
+    s = f"c:{h.get('c')}|i:{h.get('i')}|v:{h.get('v')}"
+    return s + "|d:1" if drafted_by_sync else s
+
+
+def decode_hash(s):
+    out = {}
+    for part in (s or "").split("|"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            out[k] = v
+    return out
+
+
+# ---------------------------------------------------------------- supplier
 def fetch_supplier_products():
-    all_products = []
-    page = 1
-    supplier_headers = {
-        "api-key": DROPSHIP_API_KEY,
-        "secret-key": DROPSHIP_SECRET_KEY,
-    }
-
+    headers = {"api-key": DROPSHIP_API_KEY, "secret-key": DROPSHIP_SECRET_KEY}
+    items, page, last_page, expected_total = [], 1, None, None
     while True:
-        print(f"Fetching page {page} from supplier...")
-        try:
-            response = requests.get(f"{BASE_SUPPLIER_URL}?page={page}", headers=supplier_headers, timeout=15)
-            if response.status_code != 200:
+        data = None
+        for attempt in range(1, 5):
+            try:
+                r = requests.get(f"{SUPPLIER_URL}?page={page}", headers=headers, timeout=30)
+                if r.status_code == 200:
+                    data = r.json()
+                    break
+                print(f"Supplier page {page}: HTTP {r.status_code} (attempt {attempt}/4) {r.text[:150]}")
+            except Exception as e:
+                print(f"Supplier page {page}: network error (attempt {attempt}/4): {e}")
+            time.sleep(5 * attempt)
+        if data is None:
+            raise SyncAbort(f"Supplier API failed on page {page} after 4 attempts. Nothing was changed on Shopify.")
+
+        products = data.get("products")
+        if isinstance(products, dict):
+            last_page = last_page or products.get("last_page")
+            products = products.get("data") or []
+        items.extend(products or [])
+        last_page = int(data.get("last_page") or last_page or 1)
+        expected_total = expected_total or data.get("total")
+        if page >= last_page:
+            break
+        page += 1
+        time.sleep(0.3)
+
+    if expected_total and len(items) < int(expected_total):
+        raise SyncAbort(f"Supplier returned {len(items)} products but said total={expected_total}. Nothing was changed.")
+    if not items:
+        raise SyncAbort("Supplier returned 0 products. Nothing was changed.")
+
+    by_code = {}
+    for it in items:
+        c = code_of(it)
+        if c:
+            by_code[c] = it
+    print(f"Supplier: {len(items)} products on {last_page} pages ({len(by_code)} unique codes)")
+    return by_code
+
+
+# ---------------------------------------------------------------- shopify
+class Shopify:
+    def __init__(self):
+        self.base = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}"
+        self.token = self._token()
+        self.write_failures = 0
+
+    def _token(self):
+        r = requests.post(
+            f"https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token",
+            data={"grant_type": "client_credentials", "client_id": SHOPIFY_CLIENT_ID, "client_secret": SHOPIFY_CLIENT_SECRET},
+            timeout=20,
+        )
+        tok = r.json().get("access_token") if r.ok else None
+        if not tok:
+            raise SyncAbort(f"Could not log in to Shopify (HTTP {r.status_code}): {r.text[:200]}")
+        return tok
+
+    def _req(self, method, path, **kw):
+        url = path if path.startswith("http") else self.base + path
+        headers = {"X-Shopify-Access-Token": self.token, "Content-Type": "application/json"}
+        for attempt in range(1, 6):
+            try:
+                r = requests.request(method, url, headers=headers, timeout=40, **kw)
+            except Exception as e:
+                print(f"  network error {method} {path} (attempt {attempt}/5): {e}")
+                time.sleep(3 * attempt)
+                continue
+            if r.status_code == 429:
+                time.sleep(float(r.headers.get("Retry-After", 2)))
+                continue
+            if r.status_code >= 500:
+                time.sleep(3 * attempt)
+                continue
+            # stay under the REST leaky bucket
+            used = r.headers.get("X-Shopify-Shop-Api-Call-Limit", "0/40").split("/")
+            if len(used) == 2 and int(used[0]) > int(used[1]) - 8:
+                time.sleep(1.5)
+            return r
+        return None
+
+    def graphql(self, query, variables=None):
+        for attempt in range(1, 6):
+            r = self._req("POST", "/graphql.json", json={"query": query, "variables": variables or {}})
+            if r is None or not r.ok:
+                raise SyncAbort(f"Shopify GraphQL failed: {r.status_code if r else 'no response'} {r.text[:200] if r else ''}")
+            body = r.json()
+            errs = body.get("errors")
+            if errs and any((e.get("extensions") or {}).get("code") == "THROTTLED" for e in errs):
+                time.sleep(2 * attempt)
+                continue
+            if errs:
+                raise SyncAbort(f"Shopify GraphQL error: {errs}")
+            cost = (body.get("extensions") or {}).get("cost", {}).get("throttleStatus", {})
+            if cost and cost.get("currentlyAvailable", 1000) < 300:
+                time.sleep(2)
+            return body["data"]
+        raise SyncAbort("Shopify GraphQL throttled too long")
+
+    def load_catalog(self):
+        q = """
+        query($cursor: String) {
+          products(first: 15, after: $cursor, query: "vendor:Supplier") {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              legacyResourceId title status vendor productType createdAt
+              featuredImage { id }
+              metafield(namespace: "%s", key: "%s") { value }
+              options { name }
+              variants(first: 50) { nodes { legacyResourceId sku price compareAtPrice } }
+            }
+          }
+        }""" % (HASH_NS, HASH_KEY)
+        products, cursor = [], None
+        while True:
+            data = self.graphql(q, {"cursor": cursor})["products"]
+            for n in data["nodes"]:
+                if n["vendor"] != VENDOR:
+                    continue
+                products.append({
+                    "id": int(n["legacyResourceId"]),
+                    "title": n["title"],
+                    "status": n["status"],
+                    "product_type": n["productType"] or "",
+                    "created_at": n["createdAt"],
+                    "has_image": bool(n["featuredImage"]),
+                    "hash": decode_hash((n["metafield"] or {}).get("value")),
+                    "option_name": (n["options"] or [{}])[0].get("name"),
+                    "variants": [
+                        {"id": int(v["legacyResourceId"]), "sku": v["sku"] or "",
+                         "price": float(v["price"] or 0), "compare_at": float(v["compareAtPrice"] or 0)}
+                        for v in n["variants"]["nodes"]
+                    ],
+                })
+            if not data["pageInfo"]["hasNextPage"]:
                 break
+            cursor = data["pageInfo"]["endCursor"]
+        print(f"Shopify: {len(products)} supplier products in store")
+        return products
 
-            data = response.json()
-            products_data = data.get("products", {})
-            items = products_data.get("data", []) if isinstance(products_data, dict) else products_data
-            if not items:
-                break
+    # ---- writes
+    def _ok(self, r, what):
+        if r is not None and r.status_code in (200, 201):
+            return r
+        self.write_failures += 1
+        print(f"  ✗ {what}: {r.status_code if r is not None else 'no response'} {r.text[:300] if r is not None else ''}")
+        return None
 
-            all_products.extend(items)
-            last_page = data.get("last_page") or (products_data.get("last_page") if isinstance(products_data, dict) else 1)
-            if page >= int(last_page):
-                break
+    def create_product(self, d):
+        variants = []
+        if d["variants"]:
+            for _, val in d["variants"]:
+                variants.append({"option1": val, "price": str(d["price"]), "compare_at_price": str(d["compare_at"]),
+                                 "sku": sku_for(d["code"], val), "inventory_management": None})
+        else:
+            variants.append({"price": str(d["price"]), "compare_at_price": str(d["compare_at"]),
+                             "sku": d["code"], "inventory_management": None})
+        payload = {"product": {
+            "title": d["title"], "body_html": d["body_html"], "vendor": VENDOR,
+            "product_type": d["category"], "tags": d["category"], "status": "active",
+            "images": [{"src": u} for u in d["images"]],
+            "variants": variants,
+            "metafields": [{"namespace": HASH_NS, "key": HASH_KEY, "type": "single_line_text_field",
+                            "value": encode_hash(d["hash"])}],
+        }}
+        if d["variants"]:
+            payload["product"]["options"] = [{"name": d["option_name"]}]
+        r = self._ok(self._req("POST", "/products.json", json=payload), f"create {d['title']}")
+        return r.json()["product"]["id"] if r else None
 
-            page += 1
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"Network error on page {page}, retrying in 5 seconds... ({e})")
-            time.sleep(5)
+    def update_product(self, pid, payload, what):
+        payload["id"] = pid
+        return self._ok(self._req("PUT", f"/products/{pid}.json", json={"product": payload}), what) is not None
 
-    print(f"Total products fetched from supplier: {len(all_products)}")
-    return all_products
+    def update_variant(self, vid, price, compare_at, what):
+        payload = {"variant": {"id": vid, "price": str(price), "compare_at_price": str(compare_at)}}
+        return self._ok(self._req("PUT", f"/variants/{vid}.json", json=payload), what) is not None
 
-
-def get_category_name(item):
-    candidate_keys = [
-        "category", "category_name", "categoryName", "cat_name",
-        "main_category", "main_category_name", "product_category",
-        "sub_category", "sub_category_name", "subcategory", "type",
-    ]
-
-    for key in candidate_keys:
-        val = item.get(key)
-        if not val:
-            continue
-
-        if isinstance(val, str):
-            cleaned = val.strip()
-            if cleaned:
-                return cleaned
-
-        elif isinstance(val, dict):
-            for name_key in ("name", "title", "label", "category_name"):
-                if val.get(name_key):
-                    return str(val[name_key]).strip()
-
-        elif isinstance(val, list) and val:
-            first = val[0]
-            if isinstance(first, str) and first.strip():
-                return first.strip()
-            if isinstance(first, dict):
-                for name_key in ("name", "title", "label"):
-                    if first.get(name_key):
-                        return str(first[name_key]).strip()
-
-    return "Uncategorized"
+    def set_hashes(self, pairs):
+        """pairs: [(product_id, hash_string)]"""
+        m = """mutation($m: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $m) { userErrors { field message } } }"""
+        for i in range(0, len(pairs), 25):
+            chunk = pairs[i:i + 25]
+            inp = [{"ownerId": f"gid://shopify/Product/{pid}", "namespace": HASH_NS, "key": HASH_KEY,
+                    "type": "single_line_text_field", "value": h} for pid, h in chunk]
+            try:
+                errs = self.graphql(m, {"m": inp})["metafieldsSet"]["userErrors"]
+                if errs:
+                    print(f"  ✗ saving sync markers: {errs[:3]}")
+                    self.write_failures += 1
+            except SyncAbort as e:
+                print(f"  ✗ saving sync markers: {e}")
+                self.write_failures += 1
 
 
-def create_shopify_product(item, token, category_name):
-    shopify_api_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products.json"
-    shopify_headers = {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json",
-    }
+# ---------------------------------------------------------------- planning
+def base_code(sku):
+    return (sku or "").split("-")[0].strip()
 
-    title = item.get("name", "Untitled Product")
-    body_html = item.get("details", "")
 
-    retail_price, compare_at_price = compute_prices(item)
-    base_sku = str(item.get("product_code") or item.get("id") or "")
+def plan_update(p, d):
+    """Return (product_payload or None, [variant price updates], new_hash_string or None, reasons)."""
+    reasons, payload, var_updates = [], {}, []
+    old_h = p["hash"]
+    first_sync = not old_h
 
-    image_urls = set()
-    images_payload = []
+    if p["title"] != d["title"]:
+        payload["title"] = d["title"]; reasons.append("title")
+    if p["product_type"] != d["category"]:
+        payload["product_type"] = d["category"]; payload["tags"] = d["category"]; reasons.append("category")
+    if first_sync or old_h.get("c") != d["hash"]["c"]:
+        payload["body_html"] = d["body_html"]
+        if "details" not in reasons and not first_sync:
+            reasons.append("details")
+    # only re-activate products that THIS sync hid earlier (never ones you drafted/archived yourself)
+    if p["status"] != "ACTIVE" and old_h.get("d") == "1":
+        payload["status"] = "active"; reasons.append("re-activate")
 
-    thumb = item.get("thumbnail_img")
-    if thumb and thumb.startswith("http"):
-        image_urls.add(thumb)
-        images_payload.append({"src": thumb})
+    # images: on first sync only fill in products that have none (avoid re-uploading the whole store)
+    if (first_sync and not p["has_image"] and d["images"]) or (not first_sync and old_h.get("i") != d["hash"]["i"]):
+        payload["images"] = [{"src": u} for u in d["images"]]; reasons.append("images")
 
-    for img_obj in item.get("product_images", []):
-        img_url = img_obj.get("product_image", "")
-        if img_url and img_url.startswith("http") and img_url not in image_urls:
-            image_urls.add(img_url)
-            images_payload.append({"src": img_url})
+    # variants: compare the set of option values (from SKUs) with the supplier
+    want = [val for _, val in d["variants"]]
+    have = {}
+    for v in p["variants"]:
+        sku = v["sku"]
+        val = sku[len(d["code"]) + 1:] if sku.startswith(d["code"] + "-") else None
+        have[(val or "").lower()] = v
+    want_keys = [w.lower() for w in want] if want else [""]
+    variants_changed = set(want_keys) != set(have.keys())
 
-    variants_payload = []
-    raw_variants = item.get("product_variants", [])
-
-    if raw_variants:
-        for rv in raw_variants:
-            v_name = str(rv.get("variant", "Default")).strip()
-            variants_payload.append({
-                "option1": v_name,
-                "price": str(retail_price),
-                "compare_at_price": str(compare_at_price),
-                "sku": f"{base_sku}-{v_name}",
-                "inventory_management": None
-            })
+    if variants_changed:
+        new_vars = []
+        if want:
+            for val in want:
+                ex = have.get(val.lower())
+                nv = {"option1": val, "price": str(d["price"]), "compare_at_price": str(d["compare_at"]),
+                      "sku": sku_for(d["code"], val), "inventory_management": None}
+                if ex:
+                    nv["id"] = ex["id"]
+                new_vars.append(nv)
+            payload["options"] = [{"name": d["option_name"]}]
+        else:
+            ex = have.get("")
+            nv = {"price": str(d["price"]), "compare_at_price": str(d["compare_at"]), "sku": d["code"],
+                  "inventory_management": None}
+            if ex:
+                nv["id"] = ex["id"]
+            new_vars.append(nv)
+        payload["variants"] = new_vars
+        reasons.append("variants")
     else:
-        variants_payload.append({
-            "price": str(retail_price),
-            "compare_at_price": str(compare_at_price),
-            "sku": base_sku,
-            "inventory_management": None
-        })
+        for v in p["variants"]:
+            if abs(v["price"] - d["price"]) > 0.01 or abs(v["compare_at"] - d["compare_at"]) > 0.01:
+                var_updates.append(v)
+        if var_updates:
+            reasons.append("price")
 
-    payload = {
-        "product": {
-            "title": title,
-            "body_html": body_html,
-            "vendor": "Supplier",
-            "product_type": category_name,
-            "tags": [category_name],
-            "images": images_payload,
-            "options": [{"name": "Size/Type"}] if raw_variants else [],
-            "variants": variants_payload
-        }
-    }
-
-    for attempt in range(3):
-        try:
-            res = requests.post(shopify_api_url, json=payload, headers=shopify_headers, timeout=15)
-            if res.status_code == 201:
-                new_id = res.json().get("product", {}).get("id")
-                print(f"✓ Created: {title} [{category_name}] Tk {retail_price} (was Tk {compare_at_price})")
-                return new_id
-            elif res.status_code == 429:
-                print("Rate limited by Shopify. Sleeping for 2 seconds...")
-                time.sleep(2)
-            else:
-                print(f"✗ Failed: {title} | Error: {res.text}")
-                break
-        except Exception as e:
-            print(f"⚠️ Network connection dropped while sending '{title}'. Retrying in 5s... (Attempt {attempt + 1}/3)")
-            time.sleep(5)
-    return None
+    new_hash = encode_hash(d["hash"])
+    stored = encode_hash(old_h, drafted_by_sync=old_h.get("d") == "1")
+    if old_h.get("d") == "1" and "status" not in payload:
+        new_hash = stored  # still hidden (e.g. you archived it meanwhile) - keep the marker
+    hash_str = new_hash if new_hash != stored else None
+    return (payload or None), var_updates, hash_str, reasons
 
 
-def update_shopify_product_category(product_id, category_name, title, token):
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}.json"
-    headers = {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json",
-    }
-    payload = {"product": {"id": product_id, "product_type": category_name, "tags": category_name}}
-
-    for attempt in range(3):
-        try:
-            res = requests.put(url, json=payload, headers=headers, timeout=15)
-            if res.status_code == 200:
-                print(f"🔧 Fixed category for '{title}' -> {category_name}")
-                return
-            elif res.status_code == 429:
-                time.sleep(2)
-            else:
-                print(f"✗ Failed to update category for '{title}': {res.text}")
-                break
-        except Exception as e:
-            print(f"⚠️ Network issue updating '{title}', retrying... ({e})")
-            time.sleep(5)
-
-
-def update_shopify_variant_price(variant_id, price, compare_at_price, token):
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{API_VERSION}/variants/{variant_id}.json"
-    headers = {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json",
-    }
-    payload = {"variant": {"id": variant_id, "price": str(price), "compare_at_price": str(compare_at_price)}}
-
-    for attempt in range(3):
-        try:
-            res = requests.put(url, json=payload, headers=headers, timeout=15)
-            if res.status_code == 200:
-                return True
-            elif res.status_code == 429:
-                time.sleep(2)
-            else:
-                print(f"✗ Failed to update price for variant {variant_id}: {res.text}")
-                return False
-        except Exception as e:
-            print(f"⚠️ Network issue updating price for variant {variant_id}, retrying... ({e})")
-            time.sleep(5)
-    return False
-
-
+# ---------------------------------------------------------------- main
 def main():
-    token = get_shopify_access_token()
-    if not token:
-        return
+    print(f"Mode: {'DRY RUN (no changes)' if DRY_RUN else 'LIVE'} | min markup x{MIN_MARKUP} | compare-at +{int(COMPARE_AT_PCT*100)}%")
+    supplier = fetch_supplier_products()          # raises before any write if incomplete
+    shop = Shopify()
+    catalog = shop.load_catalog()
 
-    existing_by_sku, existing_titles = get_existing_catalog_and_cleanup(token)
-    products = fetch_supplier_products()
+    # group Shopify products by supplier code; resolve the (rare) case of 2 products sharing a code
+    by_code, extra_copies = {}, []
+    for p in catalog:
+        codes = {base_code(v["sku"]) for v in p["variants"] if v["sku"]}
+        codes.discard("")
+        if len(codes) != 1:
+            continue  # not a recognisable supplier product, leave it alone
+        c = codes.pop()
+        if c in by_code:
+            keep, other = sorted([by_code[c], p], key=lambda x: x["created_at"])
+            by_code[c] = keep
+            extra_copies.append(other)
+        else:
+            by_code[c] = p
 
-    for product in products:
-        base_sku = str(product.get("product_code") or product.get("id") or "")
-        title = product.get("name", "Untitled Product")
-        norm_title = normalize_title(title)
-        category_name = get_category_name(product)
-        retail_price, compare_at_price = compute_prices(product)
+    stats = {k: 0 for k in ("created", "updated", "price_only", "unchanged", "drafted", "dup_drafted", "skipped_no_price")}
+    reason_counts = {}
+    hashes_to_save = []
+    samples = []
 
-        if base_sku in existing_by_sku:
-            info = existing_by_sku[base_sku]
-            current_type = info["product_type"]
+    def log(line):
+        if len(samples) < 40:
+            samples.append(line)
 
-            needs_category_fix = (not current_type or current_type.lower() == "uncategorized") and category_name != "Uncategorized"
-            if needs_category_fix:
-                update_shopify_product_category(info["id"], category_name, title, token)
-                info["product_type"] = category_name
-                time.sleep(0.4)
+    # 1) extra copies of the same supplier code -> draft (never delete)
+    for p in extra_copies:
+        if p["status"] != "DRAFT":
+            stats["dup_drafted"] += 1
+            log(f"🗂️  duplicate of code -> draft: {p['title']}")
+            if not DRY_RUN:
+                shop.update_product(p["id"], {"status": "draft"}, f"draft duplicate {p['title']}")
 
-            existing_variants = info.get("variants", [])
-            current_price = None
-            if existing_variants and existing_variants[0].get("price") is not None:
-                try:
-                    current_price = float(existing_variants[0]["price"])
-                except (TypeError, ValueError):
-                    current_price = None
+    # 2) products the supplier no longer lists -> draft
+    for c, p in by_code.items():
+        if c not in supplier and p["status"] == "ACTIVE":
+            stats["drafted"] += 1
+            log(f"📦 not at supplier any more -> draft: {p['title']}")
+            if not DRY_RUN:
+                if shop.update_product(p["id"], {"status": "draft"}, f"draft {p['title']}"):
+                    hashes_to_save.append((p["id"], encode_hash(p["hash"], drafted_by_sync=True)))
 
-            needs_price_fix = current_price is None or abs(current_price - retail_price) > 0.5
-            if needs_price_fix and retail_price > 0:
-                fixed_any = False
-                for v in existing_variants:
-                    if v.get("id") and update_shopify_variant_price(v["id"], retail_price, compare_at_price, token):
-                        fixed_any = True
-                    time.sleep(0.4)
-                if fixed_any:
-                    print(f"💰 Fixed price for '{title}' -> Tk {retail_price} (was showing Tk {current_price})")
-
-            if not needs_category_fix and not needs_price_fix:
-                print(f"⏭️ Skipping {title} (Already imported, OK)")
-
-            existing_titles.add(norm_title)
+    # 3) create / update from supplier
+    for c, item in supplier.items():
+        d = desired_state(item)
+        if not d["price"]:
+            stats["skipped_no_price"] += 1
+            continue
+        p = by_code.get(c)
+        if p is None:
+            stats["created"] += 1
+            log(f"✨ new: {d['title']} | Tk {d['price']} (was {d['compare_at']})")
+            if not DRY_RUN:
+                shop.create_product(d)
+                time.sleep(0.5)
             continue
 
-        if norm_title in existing_titles:
-            print(f"⏭️ Skipping {title} (Same product already exists under a different supplier code)")
-            continue
+        payload, var_updates, new_hash, reasons = plan_update(p, d)
+        for r in reasons:
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+        if not payload and not var_updates:
+            stats["unchanged"] += 1
+        elif payload:
+            stats["updated"] += 1
+            if var_updates:
+                # fold price changes into the same product PUT
+                payload["variants"] = [{"id": v["id"], "price": str(d["price"]), "compare_at_price": str(d["compare_at"])}
+                                       for v in p["variants"]] if "variants" not in payload else payload["variants"]
+            old = p["variants"][0]["price"] if p["variants"] else None
+            log(f"🔧 {d['title']} [{', '.join(reasons)}] Tk {old} -> {d['price']}")
+            if not DRY_RUN:
+                shop.update_product(p["id"], payload, f"update {d['title']}")
+        else:
+            stats["price_only"] += 1
+            old = var_updates[0]["price"]
+            log(f"💰 {d['title']} Tk {old} -> {d['price']} (was {d['compare_at']})")
+            if not DRY_RUN:
+                for v in var_updates:
+                    shop.update_variant(v["id"], d["price"], d["compare_at"], f"price {d['title']}")
+        if new_hash:
+            hashes_to_save.append((p["id"], new_hash))
 
-        new_id = create_shopify_product(product, token, category_name)
-        if new_id:
-            existing_by_sku[base_sku] = {"id": new_id, "product_type": category_name, "variants": []}
-            existing_titles.add(norm_title)
-        time.sleep(0.6)
+    if not DRY_RUN and hashes_to_save:
+        shop.set_hashes(hashes_to_save)
+
+    print("\n--- sample of changes ---")
+    for s in samples:
+        print(s)
+    print("\n--- summary ---")
+    for k, v in stats.items():
+        print(f"{k:>18}: {v}")
+    print(f"{'change reasons':>18}: {reason_counts}")
+    print(f"{'write failures':>18}: {shop.write_failures}")
+
+    if shop.write_failures > MAX_WRITE_FAILURES:
+        raise SyncAbort(f"{shop.write_failures} Shopify writes failed (limit {MAX_WRITE_FAILURES}).")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SyncAbort as e:
+        print(f"\n❌ SYNC STOPPED: {e}")
+        sys.exit(1)
