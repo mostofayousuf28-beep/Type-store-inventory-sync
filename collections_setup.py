@@ -26,12 +26,18 @@ for handle, tag, sort in [("new-arrival", "new-arrival", "created-desc"), ("best
 
 already = gql('{ productsCount(query: "tag:best-seller status:active") { count } }')["data"]["productsCount"]["count"]
 print("already tagged best-seller:", already)
+import sys
+if "--retag" in sys.argv:
+    old = gql('{ products(first: 50, query: "tag:best-seller") { nodes { id } } }')["data"]["products"]["nodes"]
+    for p in old:
+        gql("""mutation($id: ID!){ tagsRemove(id: $id, tags: ["best-seller"]) { userErrors { message } } }""", {"id": p["id"]})
+    already = 0
 if already < 8:
     picks_per_cat = [("Gadgets & Electronics", 3), ("Home & Lifestyle", 3), ("Men's Fashion", 2), ("Women's Fashion", 2),
                      ("Winter", 1), ("Kids Zone", 1)]
     chosen = []
     for cat, n in picks_per_cat:
-        q = f"product_type:'{cat}' status:active vendor:Supplier -tag:new-arrival -tag:merged"
+        q = 'product_type:"' + cat.replace('"', '') + '" status:active vendor:Supplier -tag:new-arrival -tag:merged'
         d = gql("""query($q: String!){ products(first: 60, query: $q, sortKey: CREATED_AT, reverse: true) {
                    nodes { id title variantsCount { count } mediaCount { count } descriptionHtml
                            priceRangeV2 { minVariantPrice { amount } } } } }""", {"q": q})
@@ -44,6 +50,8 @@ if already < 8:
             s += min(p["mediaCount"]["count"], 6) * 0.5                         # good photos
             s += 2 if 400 <= price <= 3000 else 0                               # typical impulse price range
             return s
+        brands = ("rolex", "hublot", "mercedes", "gucci", "louis", "apple", "samsung", "nike", "adidas", "cartier", "omega", "casio", "iphone")
+        nodes = [p for p in nodes if not any(b in p["title"].lower() for b in brands)]
         best = sorted(nodes, key=score, reverse=True)[:n]
         print(" ", cat, "->", [p["title"][:50] for p in best])
         chosen += [p["id"] for p in best]

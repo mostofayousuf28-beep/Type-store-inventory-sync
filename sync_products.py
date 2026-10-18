@@ -438,21 +438,37 @@ class Shopify:
                           json={"image": {"id": imgs[idx]["id"], "variant_ids": vids}})
 
     def create_product(self, D):
+        many = len(D["images"]) > 8
         payload = {"product": {
             "title": D["title"], "body_html": D["body_html"], "vendor": VENDOR,
             "product_type": D["category"], "tags": ", ".join(sorted(D["tags"])), "status": "active",
-            "images": [{"src": u} for u in D["images"]],
             "variants": Shopify.variant_payload(D),
             "metafields": [{"namespace": HASH_NS, "key": HASH_KEY, "type": "single_line_text_field",
                             "value": encode_hash(D["hash"])}],
         }}
+        if not many:
+            payload["product"]["images"] = [{"src": u} for u in D["images"]]
         if D["options"]:
             payload["product"]["options"] = [{"name": o} for o in D["options"]]
         r = self._ok(self._req("POST", "/products.json", json=payload), f"create {D['title']}")
         if not r:
             return None
         prod = r.json()["product"]
-        self.link_variant_images(prod["id"], D, prod)
+        if many:
+            # big combined products: add pictures one by one (one request with 50+ pictures times out)
+            vids_by_code = {}
+            for v in prod.get("variants") or []:
+                vids_by_code.setdefault(base_code(v.get("sku")), []).append(v["id"])
+            first_of = {idx: code for code, idx in D["first_img"].items()}
+            for idx, url in enumerate(D["images"]):
+                img = {"src": url, "position": idx + 1}
+                if idx in first_of:
+                    img["variant_ids"] = vids_by_code.get(first_of[idx], [])
+                rr = self._req("POST", f"/products/{prod['id']}/images.json", json={"image": img})
+                if rr is None or rr.status_code not in (200, 201):
+                    print(f"  ! picture {idx + 1} for {D['title']}: {rr.status_code if rr is not None else 'no response'}")
+        else:
+            self.link_variant_images(prod["id"], D, prod)
         return prod["id"]
 
     def update_product(self, pid, payload, what):
