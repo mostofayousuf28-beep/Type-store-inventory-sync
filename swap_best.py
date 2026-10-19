@@ -9,10 +9,11 @@ def gql(q,v=None):
         return r.json()
 def find(q):
     return gql('query($q:String!){ products(first:5, query:$q){ nodes{ id title priceRangeV2{minVariantPrice{amount}} } } }',{"q":q})["data"]["products"]["nodes"]
-out=find('tag:best-seller title:"Puja Special Premium Cotton Three-Piece Collection*"')
+out=[p for p in find('tag:best-seller Puja') if 'puja' in p['title'].lower()]
 for p in out:
     gql('mutation($id:ID!){ tagsRemove(id:$id, tags:["best-seller"]){ userErrors{message} } }',{"id":p["id"]}); print("removed:",p["title"])
-new=find('status:active title:"Premium Silk Katan Saree*"')[:1]
+new=[p for p in find('status:active Katan Saree') if 'katan' in p['title'].lower()][:1] or [p for p in find('status:active saree') if 'saree' in p['title'].lower()][:1]
 for p in new:
     gql('mutation($id:ID!){ tagsAdd(id:$id, tags:["best-seller"]){ userErrors{message} } }',{"id":p["id"]}); print("added:",p["title"],"| Tk",p["priceRangeV2"]["minVariantPrice"]["amount"])
+time.sleep(20)
 print([p["title"][:60] for p in gql('{ products(first:50, query:"tag:best-seller"){ nodes{ title } } }')["data"]["products"]["nodes"]])
