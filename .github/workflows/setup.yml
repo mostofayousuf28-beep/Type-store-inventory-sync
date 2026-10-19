@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip install requests
-      - run: (python collections_setup.py --retag; echo ====; DRY_RUN=1 python sync_products.py) > out.txt 2>&1 || true
+      - run: python swap_best.py > out.txt 2>&1 || true
         env:
           DROPSHIP_API_KEY: ${{ secrets.DROPSHIP_API_KEY }}
           DROPSHIP_SECRET_KEY: ${{ secrets.DROPSHIP_SECRET_KEY }}
