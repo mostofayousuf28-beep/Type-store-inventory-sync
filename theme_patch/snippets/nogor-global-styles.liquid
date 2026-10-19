@@ -102,4 +102,25 @@
   .product-card:has(.nogor-save-badge) .product-badges { display: none !important; }
   .resource-list__item, .resource-list__item > product-card-link { height: 100%; }
   .resource-list__item product-card { height: 100%; }
+  /* ---------- Product page gallery: smaller, square, thumbnails below ---------- */
+  @media (min-width: 750px) {
+    .product-information__media { max-width: 560px; width: 100%; justify-self: center; }
+  }
+  .product-information__media .slideshow-controls__thumbnails img,
+  .product-information__media [class*=thumbnail] img { object-fit: cover; }
+
+  /* ---------- Design option as picture swatches ---------- */
+  .variant-option__button-label:has(.ne-design-swatch) {
+    padding: 0 !important; width: 68px; height: 68px; min-width: 0 !important; flex: 0 0 auto;
+    border-radius: 12px !important; overflow: hidden; border: 1.5px solid #e2e2e2 !important; background: #fff;
+  }
+  .variant-option__button-label:has(.ne-design-swatch) .variant-option__button-label__pill { display: none; }
+  .variant-option__button-label:has(.ne-design-swatch):has(input:checked) {
+    border: 2px solid var(--ne-green) !important; box-shadow: 0 0 0 2px #fff inset;
+  }
+  .ne-design-swatch, .ne-design-swatch img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .variant-option--buttons:has(.ne-design-swatch) { display: flex; flex-wrap: wrap; gap: 8px; }
+  @media (max-width: 749px) {
+    .variant-option__button-label:has(.ne-design-swatch) { width: 58px; height: 58px; }
+  }
 </style>

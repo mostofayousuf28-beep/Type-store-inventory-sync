@@ -160,4 +160,38 @@ for key in ["templates/index.json", "templates/collection.json", "templates/sear
     if _square(j):
         put(key, json.dumps(j, ensure_ascii=False, indent=2))
 
+# 8. product page: one big square image + thumbnail strip; designs shown as picture swatches
+pj = load_json(get("templates/product.json"))
+mg = pj["sections"]["main"]["blocks"]["media-gallery"]["settings"]
+mg.update({"media_presentation": "carousel", "slideshow_controls_style": "thumbnails", "thumbnail_position": "bottom",
+           "slideshow_mobile_controls_style": "thumbnails", "thumbnail_width": 64, "thumbnail_radius": 8, "aspect_ratio": "1",
+           "media_fit": "contain", "media_radius": 12, "hide_variants": False, "constrain_to_viewport": True,
+           "icons_style": "chevron", "large_first_image": False})
+pj["sections"]["main"]["settings"]["equal_columns"] = True
+put("templates/product.json", json.dumps(pj, ensure_ascii=False, indent=2))
+
+vp = get("snippets/variant-main-picker.liquid")
+old_txt = """                  <span
+                    class="variant-option__button-label__text"
+                    data-key="variant-option-text"
+                  >
+                    {{- product_option_value | escape -}}
+                  </span>"""
+new_txt = """                  {%- assign ne_img = product_option_value.variant.featured_media -%}
+                  {%- if product_option.name == 'Design' and ne_img -%}
+                    <span class="ne-design-swatch" title="{{ product_option_value | escape }}">
+                      {{ ne_img | image_url: width: 160 | image_tag: loading: 'lazy', alt: product_option_value, width: 80, height: 80 }}
+                    </span>
+                  {%- else -%}
+                  <span
+                    class="variant-option__button-label__text"
+                    data-key="variant-option-text"
+                  >
+                    {{- product_option_value | escape -}}
+                  </span>
+                  {%- endif -%}"""
+if "ne-design-swatch" not in vp:
+    assert old_txt in vp, "variant picker markup changed"
+    put("snippets/variant-main-picker.liquid", vp.replace(old_txt, new_txt, 1))
+
 print("\nPREVIEW:", f"https://nogoressetials.com/?preview_theme_id={tid}")
