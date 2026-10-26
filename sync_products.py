@@ -19,6 +19,7 @@ Rules
   Other tags you add yourself (e.g. "best-seller") are kept.
 * Supplier no longer lists a product -> DRAFT (never deleted); it comes back -> ACTIVE again.
   Old single products that were merged into a combined product -> DRAFT with tag "merged".
+* A product tag like "price-1650" fixes that product's selling price; the sync keeps it instead of the formula.
 * Only products with vendor "Supplier" are touched.
 * If the supplier API cannot be read completely, nothing is changed and the run is marked failed.
 
@@ -497,7 +498,22 @@ class Shopify:
 MANAGED_TAGS = {NEW_TAG}
 
 
+PRICE_TAG = re.compile(r"^price-(\d{2,6})$")
+
+
+def apply_price_override(p, D):
+    """A tag like "price-1650" on a Shopify product fixes its selling price (compare-at follows automatically)."""
+    fixed = next((int(m.group(1)) for t in p["tags"] for m in [PRICE_TAG.match(t.strip().lower())] if m), None)
+    if not fixed:
+        return D
+    D = dict(D)
+    ca = compare_at(fixed, D["codes"][0])
+    D["variants"] = [dict(v, price=fixed, compare_at=ca) for v in D["variants"]]
+    return D
+
+
 def plan_update(p, D, all_categories):
+    D = apply_price_override(p, D)
     reasons, payload, var_updates = [], {}, []
     old_h = p["hash"]
     first_sync = not old_h
