@@ -1,35 +1,20 @@
-import os, time, requests
+import os, time, requests, hashlib, math
 DOM=os.environ["SHOPIFY_STORE_DOMAIN"]; V="2026-04"
 tok=requests.post(f"https://{DOM}/admin/oauth/access_token",data={"grant_type":"client_credentials","client_id":os.environ["SHOPIFY_CLIENT_ID"],"client_secret":os.environ["SHOPIFY_CLIENT_SECRET"]},timeout=20).json()["access_token"]
-H={"X-Shopify-Access-Token":tok,"Content-Type":"application/json"}
+H={"X-Shopify-Access-Token":tok,"Content-Type":"application/json"}; B=f"https://{DOM}/admin/api/{V}"
 def gql(q,v=None):
     for a in range(8):
-        r=requests.post(f"https://{DOM}/admin/api/{V}/graphql.json",headers=H,json={"query":q,"variables":v or {}},timeout=60)
+        r=requests.post(f"{B}/graphql.json",headers=H,json={"query":q,"variables":v or {}},timeout=60)
         if r.status_code==429 or "THROTTLED" in r.text: time.sleep(3+a); continue
         return r.json()
-d=gql('{ products(first:10, query:"Galaxy Star Projector status:active"){ nodes{ id title tags variants(first:5){ nodes{ sku price compareAtPrice } } } } }')
-nodes=[p for p in d["data"]["products"]["nodes"] if "galaxy" in p["title"].lower() and "projector" in p["title"].lower()]
-for p in nodes: print("found:",p["title"],[ (v["sku"],v["price"],v["compareAtPrice"]) for v in p["variants"]["nodes"]], p["tags"])
-target=[p for p in nodes if "2-in-1" in p["title"].lower() and "12 interchangeable" in p["title"].lower()]
-if len(target)!=1:
-    raise SystemExit(f"expected exactly 1 match, got {len(target)}")
-p=target[0]
-codes={v["sku"].split("-")[0] for v in p["variants"]["nodes"]}
-H2={"api-key":os.environ["DROPSHIP_API_KEY"],"secret-key":os.environ["DROPSHIP_SECRET_KEY"]}
-pg=1
-while True:
-    for a in range(5):
-        r=requests.get(f"https://mohasagor.com.bd/api/reseller/product?page={pg}",headers=H2,timeout=30)
-        j=r.json() if r.ok else {}
-        if "products" in j: break
-        print("supplier page",pg,r.status_code,r.text[:120]); time.sleep(5*(a+1))
-    if "products" not in j: break
-    for it in j["products"]:
-        if str(it["product_code"]) in codes: print("supplier:",it["product_code"],"retail",it["price"],"cost",it["sale_price"])
-    if pg>=j["last_page"]: break
-    pg+=1
-old=[t for t in p["tags"] if t.lower().startswith("price-")]
-if old: gql('mutation($id:ID!,$t:[String!]!){ tagsRemove(id:$id, tags:$t){ userErrors{message} } }',{"id":p["id"],"t":old})
-r=gql('mutation($id:ID!){ tagsAdd(id:$id, tags:["price-1650"]){ userErrors{message} } }',{"id":p["id"]})
-print("tag added:", r["data"]["tagsAdd"]["userErrors"] or "ok")
-time.sleep(5)
+DISCOUNTS=[0.15,0.18,0.20,0.22,0.25,0.28,0.30,0.33,0.35]
+d=gql('{ products(first:10, query:"Galaxy Star Projector status:active"){ nodes{ id legacyResourceId title tags variants(first:5){ nodes{ legacyResourceId sku price compareAtPrice } } } } }')
+p=[x for x in d["data"]["products"]["nodes"] if "2-in-1" in x["title"].lower() and "12 interchangeable" in x["title"].lower()][0]
+code=p["variants"]["nodes"][0]["sku"].split("-")[0]
+disc=DISCOUNTS[int(hashlib.md5(code.encode()).hexdigest(),16)%len(DISCOUNTS)]
+ca=int(math.ceil(1650/(1-disc)/10)*10)
+for v in p["variants"]["nodes"]:
+    r=requests.put(f"{B}/variants/{v['legacyResourceId']}.json",headers=H,json={"variant":{"id":int(v["legacyResourceId"]),"price":"1650","compare_at_price":str(ca)}})
+    print("variant",v["sku"],r.status_code,"->",r.json().get("variant",{}).get("price"),r.json().get("variant",{}).get("compare_at_price"))
+print("tags:",p["tags"])
+print("supplier key check:",requests.get("https://mohasagor.com.bd/api/reseller/product?page=1",headers={"api-key":os.environ["DROPSHIP_API_KEY"],"secret-key":os.environ["DROPSHIP_SECRET_KEY"]},timeout=30).status_code)
