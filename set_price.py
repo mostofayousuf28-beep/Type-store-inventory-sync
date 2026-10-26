@@ -18,7 +18,12 @@ codes={v["sku"].split("-")[0] for v in p["variants"]["nodes"]}
 H2={"api-key":os.environ["DROPSHIP_API_KEY"],"secret-key":os.environ["DROPSHIP_SECRET_KEY"]}
 pg=1
 while True:
-    j=requests.get(f"https://mohasagor.com.bd/api/reseller/product?page={pg}",headers=H2,timeout=30).json()
+    for a in range(5):
+        r=requests.get(f"https://mohasagor.com.bd/api/reseller/product?page={pg}",headers=H2,timeout=30)
+        j=r.json() if r.ok else {}
+        if "products" in j: break
+        print("supplier page",pg,r.status_code,r.text[:120]); time.sleep(5*(a+1))
+    if "products" not in j: break
     for it in j["products"]:
         if str(it["product_code"]) in codes: print("supplier:",it["product_code"],"retail",it["price"],"cost",it["sale_price"])
     if pg>=j["last_page"]: break
