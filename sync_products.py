@@ -6,7 +6,8 @@ Rules
 * Supplier products with the SAME NAME (usually the same item in another colour/design) become ONE Shopify
   product with a "Design" option (Design 1, Design 2, ...), each design showing its own picture.
   Products are matched only by supplier product_code (Shopify SKU = "<code>" or "<code>-<size>").
-* Title on Shopify = "<supplier name> - <product_code of the first design>".
+* Title on Shopify = "<supplier name> - <product_code of the first design>"; URL = /products/<that code>
+  (old long URLs redirect automatically).
 * Selling price = max(supplier retail price, dropshipper cost x MIN_MARKUP), rounded up to the next 10.
   (supplier "price" = Customer/Retail price, supplier "sale_price" = Dropshipper price / our cost)
 * Compare-at ("crossed out") price: a discount between 15% and 35% that differs per product (not the same
@@ -259,7 +260,7 @@ def desired_group(members, new_codes):
     body = format_description(first.get("details"), video)
     tags = {category} | ({NEW_TAG} if any(code_of(m) in new_codes for m in members) else set())
     return {
-        "codes": [code_of(m) for m in members], "multi": multi, "title": title, "body_html": body,
+        "codes": [code_of(m) for m in members], "handle": pcode, "multi": multi, "title": title, "body_html": body,
         "category": category, "options": options, "variants": variants, "images": images,
         "first_img": first_img, "tags": tags,
         "hash": {"c": short_hash([title, body, category]), "i": short_hash(images),
@@ -366,7 +367,7 @@ class Shopify:
           products(first: 8, after: $cursor, query: "vendor:Supplier") {
             pageInfo { hasNextPage endCursor }
             nodes {
-              legacyResourceId title status vendor productType createdAt tags
+              legacyResourceId handle title status vendor productType createdAt tags
               featuredImage { id }
               metafield(namespace: "%s", key: "%s") { value }
               options { name }
@@ -384,7 +385,7 @@ class Shopify:
                 if opts == ["Title"]:
                     opts = []
                 products.append({
-                    "id": int(n["legacyResourceId"]), "title": n["title"], "status": n["status"],
+                    "id": int(n["legacyResourceId"]), "handle": n["handle"], "title": n["title"], "status": n["status"],
                     "product_type": n["productType"] or "", "created_at": n["createdAt"], "tags": set(n["tags"] or []),
                     "has_image": bool(n["featuredImage"]),
                     "hash": decode_hash((n["metafield"] or {}).get("value")), "options": opts,
@@ -441,7 +442,7 @@ class Shopify:
     def create_product(self, D):
         many = len(D["images"]) > 8
         payload = {"product": {
-            "title": D["title"], "body_html": D["body_html"], "vendor": VENDOR,
+            "title": D["title"], "handle": D["handle"], "body_html": D["body_html"], "vendor": VENDOR,
             "product_type": D["category"], "tags": ", ".join(sorted(D["tags"])), "status": "active",
             "variants": Shopify.variant_payload(D),
             "metafields": [{"namespace": HASH_NS, "key": HASH_KEY, "type": "single_line_text_field",
@@ -476,6 +477,17 @@ class Shopify:
         payload["id"] = pid
         r = self._ok(self._req("PUT", f"/products/{pid}.json", json={"product": payload}), what)
         return r.json()["product"] if r else None
+
+    def set_handle(self, pid, handle, what):
+        """Short URL /products/<code>; the old URL keeps working through an automatic redirect."""
+        m = """mutation($p: ProductUpdateInput!) { productUpdate(product: $p) { product { handle } userErrors { field message } } }"""
+        try:
+            d = self.graphql(m, {"p": {"id": f"gid://shopify/Product/{pid}", "handle": handle, "redirectNewHandle": True}})
+            errs = d["productUpdate"]["userErrors"]
+            if errs:
+                print(f"  x handle {what}: {errs[:2]}"); self.write_failures += 1
+        except SyncAbort as e:
+            print(f"  x handle {what}: {e}"); self.write_failures += 1
 
     def update_variant(self, vid, price, compare_at, what):
         payload = {"variant": {"id": vid, "price": str(price), "compare_at_price": str(compare_at)}}
@@ -581,7 +593,7 @@ def main():
 
     stats = {k: 0 for k in ("created", "updated", "price_only", "unchanged", "drafted_gone",
                             "drafted_merged", "drafted_duplicate")}
-    reasons_count, samples, hashes, to_create, to_update, to_draft = {}, [], [], [], [], {}
+    reasons_count, samples, hashes, to_create, to_update, to_draft, to_handle = {}, [], [], [], [], {}, []
     claimed = set()
 
     def log(s):
@@ -614,6 +626,8 @@ def main():
             log(f"+ new{' (combined ' + str(len(members)) + ' designs)' if D['multi'] else ''}: {D['title']}")
             continue
         claimed.add(keeper["id"])
+        if keeper.get("handle") != D["handle"]:
+            to_handle.append((keeper["id"], D["handle"], D["title"]))
         payload, var_updates, h, reasons, relink = plan_update(keeper, D, all_categories)
         for r in reasons:
             reasons_count[r] = reasons_count.get(r, 0) + 1
@@ -645,6 +659,7 @@ def main():
     for k, v in stats.items():
         print(f"{k:>18}: {v}")
     print(f"{'change reasons':>18}: {reasons_count}")
+    print(f"{'short URL changes':>18}: {len(to_handle)}")
     if DRY_RUN:
         ex = next((D for D in (desired_group(g, new_codes) for g in groups) if D["multi"]), None)
         if ex:
@@ -676,7 +691,8 @@ def main():
             for vid, pr, ca in var_updates:
                 shop.update_variant(vid, pr, ca, f"price {D['title']}")
 
-    for label, fn, jobs in (("Creating", shop.create_product, to_create),
+    for label, fn, jobs in (("Short URL", lambda j: shop.set_handle(j[0], j[1], j[2]), to_handle),
+                            ("Creating", shop.create_product, to_create),
                             ("Updating", _update, to_update),
                             ("Hiding", _draft, list(to_draft.items()))):
         if not jobs:
